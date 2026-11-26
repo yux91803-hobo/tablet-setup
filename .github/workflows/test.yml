@@ -1,0 +1,24 @@
+# 改平板文件只跑这里的测试（一两分钟）。合并到 main 后，Cloudflare Pages 自动把仓库根目录发布到 https://tablet.liming-work.com/
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: 单元测试（装机脚本、ib、网关插件、配置、发布的文件）
+        run: node --test test/*.test.cjs
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+          shellcheck --version | sed -n 2p
+          shellcheck setup.sh ib.sh dsh-tablet.sh

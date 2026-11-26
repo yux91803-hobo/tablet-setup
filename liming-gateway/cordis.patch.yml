@@ -1,0 +1,4 @@
+# 装法：dsh plugin --profile web add /root/liming-gateway（装机脚本会做）
+- insert:
+    - id: liming-gateway
+      name: liming-gateway
