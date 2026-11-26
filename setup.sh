@@ -194,14 +194,20 @@ install_tools() {
 
 # 在云电脑上跑的准备脚本（经 instabox exec --stdin 送过去）。每一项各自报一行「LMC 项 结果」，一项失败不影响别的项。
 # 只动这些：以前的租约插件（删）、~/.config/liming、~/.profile 里的一行导出、Codex 配置里的本机网关线路（先备份）、
-# 浏览器命令行，以及第一步就有的手动切主机配置（dsh-tablet、Harness web 配置补丁）。小芯、天启的文件和服务不碰。
+# 浏览器命令行、Harness 的 web 和 tablet 配置补丁（先备份）、dsh-tablet 和 dsh-task 两个包装脚本。
+# 小芯、天启的文件不碰（它们的常驻服务关掉、不删）。Antigravity 只看装没装、登没登录。
 remote_script() {
-  local machine=$1 wrapper=$2 profile=$3
+  local machine=$1 wrapper=$2 task=$3 profile=$4
   printf 'set +x\nLIMING_MACHINE=%q\nPLAYWRIGHT_CLI_VERSION=%q\n' "$machine" "$PLAYWRIGHT_CLI_VERSION"
   cat <<'HEAD'
 set -u
 umask 077
 st() { printf 'LMC %s %s\n' "$1" "$2"; }
+# 换配置补丁：原来有、内容又不一样才备份
+put_patch() {
+  if [ -s "$1" ] && ! cmp -s "$1" "$2"; then mv -f "$1" "$1.bak.$(date +%Y%m%d%H%M%S)"; fi
+  mv -f "$2" "$1"
+}
 # 0. 小芯、天启已停用（站长 2026-11-26）：关掉并停下它们的用户级常驻服务。文件不删，想恢复用 systemctl --user enable --now
 XU="$HOME/.config/systemd/user"
 if [ -f "$XU/xin-kernel-resident.service" ] || [ -f "$XU/xin-reaper.timer" ]; then
@@ -305,7 +311,7 @@ fi
 # 4. 浏览器命令行（Playwright CLI）和它的 Chromium
 if ! command -v playwright-cli >/dev/null 2>&1; then npm i -g "@playwright/cli@$PLAYWRIGHT_CLI_VERSION" </dev/null >/dev/null 2>&1 || true; fi
 if command -v playwright-cli >/dev/null 2>&1 && playwright-cli install-browser chromium </dev/null >/dev/null 2>&1; then st browser ok; else st browser failed; fi
-# 5. 手动切主机（调试用）：Harness web 配置的网关补丁和包装脚本，照第一步
+# 5. Harness：手动切主机（调试用）的 web 配置补丁和 dsh-tablet；平板 AI 交任务用的 tablet 配置和 dsh-task
 if [ -x "$HOME/.local/bin/dsh" ] && [ -s "$HOME/.xin/harness.key" ]; then
   WS=${LIMING_REMOTE_WS:-/data/workspace/tablet}
   mkdir -p "$HOME/.local/bin" "$HOME/.dsh/profiles/web" "$WS"
@@ -322,20 +328,42 @@ MID
   cat "$profile"
   cat <<'TAIL'
 LIMING_PROFILE_EOF
-  if [ -s "$P" ] && ! grep -q "scripts/tablet-profile.mjs" "$P"; then mv -f "$P" "$P.bak.$(date +%Y%m%d%H%M%S)"; fi
-  mv -f "$P.new" "$P"
+  put_patch "$P" "$P.new"
   st host-switch "$HOME/.local/bin/dsh-tablet $WS"
+  # tablet 配置：第一次从 Harness 自带的 headless 模板建（不带天启的人设和插件），补丁和 web 的一样（网关线路和默认模型）
+  TP="$HOME/.dsh/profiles/tablet"
+  if [ ! -f "$TP/cordis.yml" ]; then "$HOME/.local/bin/dsh" --profile tablet --from-default-profile headless --dump-config </dev/null >/dev/null 2>&1 || true; fi
+  if [ -f "$TP/cordis.yml" ] && cp "$P" "$TP/cordis.patch.yml.new"; then
+    put_patch "$TP/cordis.patch.yml" "$TP/cordis.patch.yml.new"
+    cat > "$HOME/.local/bin/dsh-task.tmp" <<'LIMING_TASK_EOF'
+TAIL
+  cat "$task"
+  cat <<'END'
+LIMING_TASK_EOF
+    chmod 700 "$HOME/.local/bin/dsh-task.tmp"
+    mv -f "$HOME/.local/bin/dsh-task.tmp" "$HOME/.local/bin/dsh-task"
+    st harness ok
+  else
+    st harness failed
+  fi
 else
   st host-switch skipped
+  st harness none
+fi
+# 6. Antigravity（两台都用）：只看装没装、登没登录；账号由站长自己在那台上登
+if [ -x "$HOME/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
+  if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then st antigravity ok; else st antigravity logged-out; fi
+else
+  st antigravity none
 fi
 echo "LMC done"
-TAIL
+END
 }
 
 # 在一台上跑准备脚本，输出「准备好了…」或「没准备好…」一句（不中断整个装机）。
 remote_setup() {
   local m=$1 out val notes=''
-  if ! out=$(remote_script "$m" "$WORK/dsh-tablet.sh" "$WORK/dsh-tablet-profile.yml" | ibx "$m" exec "$m" --stdin --timeout 600 -- bash -s 2>&1) \
+  if ! out=$(remote_script "$m" "$WORK/dsh-tablet.sh" "$WORK/dsh-task.sh" "$WORK/dsh-tablet-profile.yml" | ibx "$m" exec "$m" --stdin --timeout 600 -- bash -s 2>&1) \
      || ! printf '%s\n' "$out" | grep -q '^LMC done$'; then
     case "$out" in
       *cool*) val='在冷却';;
@@ -355,6 +383,14 @@ remote_setup() {
     provider-added-not-default) notes="$notes；Codex 原来指定了别的默认线路，没改，用本机网关要加 -c model_provider=workbuddy";;
   esac
   [ "$(lmc browser)" = ok ] || notes="$notes；浏览器命令行没装好，稍后重跑"
+  case "$(lmc harness)" in
+    none) notes="$notes；没有 Harness（或没有它的网关 key）";;
+    failed) notes="$notes；Harness 的 tablet 配置没建成，稍后重跑";;
+  esac
+  case "$(lmc antigravity)" in
+    logged-out) notes="$notes；Antigravity 还没登录";;
+    none) notes="$notes；没装 Antigravity";;
+  esac
   val=$(lmc host-switch)
   printf '%s：准备好了%s\n' "$m" "$notes"
   if [ -n "$val" ] && [ "$val" != skipped ]; then printf '  手动切主机（调试用）的启动命令：%s，工作目录 %s\n' "${val%% *}" "${val#* }"; fi
@@ -379,7 +415,8 @@ dry_run_plan() {
   say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉。"
   say "6. 装 ib 到 $BIN_DIR/ib，技能到 $SKILL_DIR/SKILL.md。"
   say "7. 在每台云电脑上：停掉小芯、天启的后台服务（xin-kernel-resident、xin-reaper，文件不删）；删以前的租约插件；把本机网关的 key 给 Codex（~/.config/liming、~/.profile 一行、Codex 配置的本机网关线路，先备份）；"
-  say "   装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium；照旧写手动切主机用的 dsh-tablet 和 web 配置。"
+  say "   装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium；写手动切主机用的 dsh-tablet 和 web 配置；"
+  say "   第一次从 Harness 自带模板建 tablet 配置、装 dsh-task（平板 AI 交任务给 Harness 用）；看 Antigravity 登没登录。"
 }
 
 summary() {
@@ -393,7 +430,8 @@ summary() {
   cat <<'EOF'
 
 以后直接在聊天里让 AI 用云电脑，比如「看看 li2 上 /data/workspace 里有什么」「在 li 上编译这个工程」
-「在 li2 上打开某个网页帮我查」「把这个功能交给 li2 上的 Codex 做，做完你检查」。
+「在 li2 上打开某个网页帮我查」「把这个功能交给 li 上的 Codex 做，做完你检查」。
+编程代理：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity。Antigravity 要你先在两台上各登一个谷歌账号。
 想看云上的浏览器：在 InstaBox 网页打开那台机器的 Computer 页签。
 
 第一次装时还要在 App 里：
@@ -434,6 +472,7 @@ main() {
   fetch_file "$BASE/ib.sh" "$WORK/ib.sh" 'LIMING_IB_DIR' || die "ib 没下载下来"
   fetch_file "$BASE/skills/liming-cloud-computers/SKILL.md" "$WORK/SKILL.md" 'name: liming-cloud-computers' || die "技能没下载下来"
   fetch_file "$BASE/dsh-tablet.sh" "$WORK/dsh-tablet.sh" 'dsh-tablet' || die "包装脚本没下载下来"
+  fetch_file "$BASE/dsh-task.sh" "$WORK/dsh-task.sh" 'dsh-task' || die "包装脚本没下载下来"
   fetch_file "$BASE/dsh-tablet-profile.yml" "$WORK/dsh-tablet-profile.yml" '- id: llm-pi-ai' || die "tablet 配置没下载下来"
 
   if [ "$skip_li" = 1 ]; then setup_keys li2; else setup_keys li2 li; fi

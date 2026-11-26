@@ -2,6 +2,25 @@
 
 最新的在最上面。搬出来以前的记录（2026-11-25、11-26）在 liming-work-site 仓库的 `docs/CHANGES.md`。
 
+## 2026-11-26 深夜 云电脑按机器分工：li 用 Codex、Antigravity，li2 用 Harness、Antigravity
+
+- **站长说的**：「云上的 Claude Code 我不用，还有两台电脑上的谷歌反重力 Antigravity，我需要用，我到时候给两台电脑都登上不同谷歌会员账号。li 上目前只用 Codex 和反重力，li2 目前只用 Harness 和反重力。」
+- **技能「云电脑」**：按机器分工写清楚。
+  - Codex 只派给 li。
+  - Harness 只用 li2，经新的 `dsh-task`。
+  - Antigravity 两台都用：`agy -p … --dangerously-skip-permissions --output-format json`，用 `conversation_id` 接着做；没登录就请站长到那台的 Computer 页签登录，额度用完换另一台。
+  - 云上的 Claude Code 不用。
+- **Harness 不用天启那份配置**：li2 的 `headless` 配置带着天启接进来的 purge 插件和人设。装机脚本在云电脑上第一次跑时，用 `dsh --profile tablet --from-default-profile headless` 从 Harness 自带模板建一份 `tablet` 配置，补丁和 `web` 一样（本机网关线路、默认模型）。
+  - 没用单独的 `DSH_HOME`：小芯装的 `~/.local/bin/dsh` 启动脚本会把它强制设回 `~/.dsh`。这是在 li 上实测踩到的。
+  - `dsh-task` 设 `DSH_PERMISSION_MODE=danger-full-access`，是 Harness 自带的「完全放权、不问审批」档，和云上的 Codex、Antigravity 一样。不设的话，模板组合出的默认权限对不上任何预设，权限插件不启用，Harness 会报警告。
+- **装机结果多两项**：哪台的 Harness 没装或 tablet 配置没建成；哪台没装 Antigravity、还没登录（看 `~/.gemini/antigravity-cli` 里有没有登录令牌）。
+- **修了一个上次留下的问题**：上次把 `dsh-tablet-profile.yml` 开头的说明改成「手动维护」，可装机脚本是靠旧说明里的一个文件名认「这是我们自己的配置」。标记没了以后，每次重跑都多备份一份 web 配置。现在改成内容有变才备份，先写了测试看到红。
+- **验证**：
+  - 本地 `node --test test/*.test.cjs` 52/52；新加和改动的测试都是先红后绿。ShellCheck 0.11.0 没有警告。
+  - 在 li 上实跑（用会话里 li 账号的 key）：新的云端准备脚本各项 ok，重跑不再多备份。`dsh-task --json` 建出了文件，用 sessionId 接着改也成了，没有权限警告。`agy -p … --output-format json` 建出了文件，结果里有 `conversation_id`；`agy models` 能列出模型。
+  - li2 要等站长重跑装机命令（会话里没有 li2 账号的 key）。
+- **谁做的**：Claude Code 实现并自查，没有独立复核。
+
 ## 2026-11-26 从网站仓库搬出来，单独发布到 tablet.liming-work.com
 
 - **为什么**：站长问「为啥不建一个新仓库搞这个？不然你这部署还要跑之前的东西。」平板文件放在网站仓库时，只改一个平板文件，也要先跑网站的 1150 项单测和 15 组浏览器测试，再整站部署，大约 20 分钟。这里只有平板自己的 47 项测试，几十秒跑完。

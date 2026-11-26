@@ -6,6 +6,7 @@ const {spawnSync}=require('node:child_process');
 const root=path.resolve(__dirname,'..');
 const yml=path.join(root,'dsh-tablet-profile.yml');
 const wrapper=path.join(root,'dsh-tablet.sh');
+const task=path.join(root,'dsh-task.sh');
 const profile=()=>fs.readFileSync(yml,'utf8');
 const tmp=t=>{const d=fs.mkdtempSync(path.join(os.tmpdir(),'tablet-profile-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));return d;};
 
@@ -28,7 +29,7 @@ test('不带人设、purge、REA，也不写 key：平板那边只要线路和�
 
 function fakeHome(t,key){
   const home=tmp(t);fs.mkdirSync(path.join(home,'.local/bin'),{recursive:true});
-  fs.writeFileSync(path.join(home,'.local/bin/dsh'),'#!/bin/sh\nprintf \'%s\\n\' "$@" > "$HOME/args.txt"\nprintf \'%s\' "$XIN_HARNESS_KEY" > "$HOME/key-seen.txt"\n',{mode:0o755});
+  fs.writeFileSync(path.join(home,'.local/bin/dsh'),'#!/bin/sh\nprintf \'%s\\n\' "$@" > "$HOME/args.txt"\nprintf \'%s\' "$XIN_HARNESS_KEY" > "$HOME/key-seen.txt"\nprintf \'%s\' "${DSH_PERMISSION_MODE-unset}" > "$HOME/perm-seen.txt"\n',{mode:0o755});
   if(key!=null){fs.mkdirSync(path.join(home,'.xin'));fs.writeFileSync(path.join(home,'.xin/harness.key'),key,{mode:0o600});}
   return home;
 }
@@ -47,6 +48,26 @@ test('包装脚本把 DSH Go 追加的参数原样传给 dsh，固定用内置�
 test('这台电脑没有网关 key 时退出码 78、说明缺哪个文件，不启动 dsh',t=>{
   const home=fakeHome(t,null);
   const r=spawnSync('sh',[wrapper,'web'],{env:{PATH:process.env.PATH,HOME:home},encoding:'utf8'});
+  assert.equal(r.status,78);assert.match(r.stderr,/harness\.key/);
+  assert.ok(!fs.existsSync(path.join(home,'args.txt')));
+});
+
+test('dsh-task：在当前目录交给 Harness 一个任务，用单独的 tablet 配置、完全放权不问审批（Harness 自带的 danger-full-access 档）；参数原样接在后面，key 只进环境变量',t=>{
+  assert.equal(spawnSync('sh',['-n',task]).status,0);
+  const home=fakeHome(t,'test-key-456\n');
+  const r=spawnSync('sh',[task,'--session-id','s-1','做 a b'],{env:{PATH:process.env.PATH,HOME:home},encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(home,'args.txt'),'utf8').split('\n').slice(0,-1),
+    ['--profile','tablet','--session-id','s-1','做 a b']);
+  assert.equal(fs.readFileSync(path.join(home,'key-seen.txt'),'utf8'),'test-key-456');
+  // 不设这个，自带模板组合出的默认权限对不上任何预设，权限插件不启用（li 上 rc.3 实测）
+  assert.equal(fs.readFileSync(path.join(home,'perm-seen.txt'),'utf8'),'danger-full-access');
+  assert.ok(!(r.stdout+r.stderr).includes('test-key-456'));
+});
+
+test('dsh-task：这台电脑没有网关 key 时退出码 78、说明缺哪个文件，不启动 dsh',t=>{
+  const home=fakeHome(t,null);
+  const r=spawnSync('sh',[task,'x'],{env:{PATH:process.env.PATH,HOME:home},encoding:'utf8'});
   assert.equal(r.status,78);assert.match(r.stderr,/harness\.key/);
   assert.ok(!fs.existsSync(path.join(home,'args.txt')));
 });
