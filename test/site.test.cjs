@@ -4,7 +4,7 @@ const fs=require('node:fs'),path=require('node:path');
 const root=path.resolve(__dirname,'..');
 const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]);
 // 装到平板或云电脑上的文件
-const CODE=['setup.sh','ib.sh','dsh-tablet.sh','dsh-tablet-profile.yml',...walk(path.join(root,'liming-gateway')),...walk(path.join(root,'skills'))]
+const CODE=['setup.sh','ib.sh','dsh-tablet.sh','dsh-task.sh','dsh-tablet-profile.yml',...walk(path.join(root,'liming-gateway')),...walk(path.join(root,'skills'))]
   .map(f=>path.isAbsolute(f)?f:path.join(root,f));
 
 test('装出去的文件里不再出现旧地址（网站上的 /tablet/）和网站仓库的说明文档',()=>{

@@ -12,7 +12,7 @@
 - **让它动云电脑**：li、li2 是它的两台云电脑，它自己用，不用先问你。
   - 看文件、改文件、跑命令、编译（STM32 相关的用 li）。
   - 打开网页并操作。你想看的话，让它「开着界面」，然后在 InstaBox 网页打开那台机器的 Computer 页签，能看着它操作，也能点进去自己接手（登录、验证码）。
-  - 大的编程活可以交给云上的 Codex。Codex 在云上后台跑，平板断开也不停；做完平板 AI 会收到通知，自己检查改动和测试，再告诉你结果。
+  - 大的编程活可以交给云上的编程代理：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity。它们在云上后台跑，平板断开也不停；做完平板 AI 会收到通知，自己检查改动和测试，再告诉你结果。
 
   它用的是 InstaBox 官方命令行（平板上的 `ib`）和一份技能说明，聊天里能看到它执行的每条命令和结果。睡着的机器第一次用要等十几到四十秒叫醒。
 - **手动切主机只留着调试**：对话列表底部点主机名还能切到 li2、li，日常用不着。
@@ -82,9 +82,12 @@
 
 - **命令和文件**：`ib exec li2 -- '命令'`（一条最长 10 分钟），`ib files` 看文件，`ib pull`、`ib push` 拷文件。长命令放到云上后台跑，平板这边等它结束，结束时 AI 会收到通知。
 - **浏览器**：云上的 Playwright 命令行（`playwright-cli`），多次操作用同一个浏览器，按页面结构点按、输入。平时不显示界面；你想看、或者要你登录时，它会开着界面并告诉你去 Computer 页签。
-- **交给 Codex**：`ib agent prompt li2 --provider codex …`。Codex 用那台云电脑自己的网关，可以插话、中断、接着做。Codex 说做完了不算数，平板 AI 会自己看改动、跑测试。
-- **Claude Code** 在云上还没登录，现在不用；云上的 Harness 也没给平板 AI 接线。
-- **规矩**：不建、不删机器和快照（key 也没这个权限）；小芯、天启的服务已关、别再打开，留下的文件不动；网关别停，Codex 要用它。
+- **交给编程代理**（代理说做完了不算数，平板 AI 会自己看改动、跑测试）：
+  - **Codex（li）**：`ib agent prompt li --provider codex …`，用 li 自己的网关，可以插话、中断、接着做。
+  - **Harness（li2）**：`dsh-task "任务"`。用单独的 tablet 配置（Harness 自带的模板加 li2 的网关线路），不带天启的人设和插件；完全放权、不问审批。
+  - **Antigravity（两台）**：`agy -p "任务"`，用你在那台上登的谷歌账号，两台各一个账号、额度分开。**要你自己先登录**：在 InstaBox 网页打开那台的 Computer 页签，在那里登录 Antigravity。装机脚本最后会告诉你哪台还没登录。
+  - 云上的 Claude Code 不用。
+- **规矩**：不建、不删机器和快照（key 也没这个权限）；小芯、天启的服务已关、别再打开，留下的文件不动；网关别停，Codex、Harness 要用它。
 
 **机器睡着、冷却**：用到时自动叫醒，第一次要等十几到四十秒。免费版一轮最多 120 到 480 分钟，到了会暂停、冷却一阵，那段时间用不了那台。AI 会看状态（`ib ls` 不叫醒机器），换另一台或者告诉你几点能用。
 
@@ -94,8 +97,9 @@
 
 1. 让 AI「看看 li2 的 /data/workspace 里有什么」：它跑 `ib`，回你目录列表。睡着的话先等一会儿。
 2. 让 AI「在 li2 上打开 example.com，告诉我页面标题，开着界面」：同时在 InstaBox 网页里打开 li2 的 Computer 页签，能看到浏览器开着。
-3. 让 AI「在 li2 上新建一个小工程，让 Codex 写个 hello world 程序并跑通，你检查一下」：Codex 在云上做，做完平板 AI 收到通知，自己检查后告诉你结果。
-4. 什么都不做、空闲 30 分钟：li2、li 照常睡。
+3. 让 AI「在 li 上新建一个小工程，让 Codex 写个 hello world 程序并跑通，你检查一下」；再让它「在 li2 上交给 Harness 做同样的事」。代理在云上做，做完平板 AI 收到通知，自己检查后告诉你结果。
+4. 登录 Antigravity 以后，让 AI「在 li2 上交给 Antigravity 写个小程序」，li 上也试一次。
+5. 什么都不做、空闲 30 分钟：li2、li 照常睡。
 
 ## 别做的事
 
@@ -120,8 +124,9 @@
 | `liming-gateway/` | DSH 插件：网关跟着本机引擎启停 |
 | `ib.sh` | 平板上的 `ib`：按机器选那台所在账号的 key，跑 InstaBox 命令行 |
 | `skills/liming-cloud-computers/SKILL.md` | 平板 AI 的技能「云电脑」：怎么用 li、li2 |
+| `dsh-task.sh` | 放到 li、li2 上的 `dsh-task`：平板 AI 把任务交给 Harness 时用，单独的 `tablet` 配置、完全放权 |
 | `dsh-tablet.sh` | 放到 li、li2 上的包装脚本（手动切主机用）：读本机网关 key，固定用 Harness 内置的 `web` 配置 |
-| `dsh-tablet-profile.yml` | li、li2 上 `web` 配置的网关线路，手动维护 |
+| `dsh-tablet-profile.yml` | li、li2 上 `web`、`tablet` 两份 Harness 配置的网关线路，手动维护 |
 | `404.html` | 缺的文件回 404，打开根地址能看到装机命令 |
 | `test/` | 测试，GitHub Actions 每个 PR 和 main 都跑 |
 

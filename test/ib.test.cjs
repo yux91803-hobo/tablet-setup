@@ -101,3 +101,14 @@ test('技能：front matter 有 name 和 description，正文讲 ib、长任务�
   assert.doesNotMatch(s, /ibk_[A-Za-z0-9]{6,}|ibssh_[A-Za-z0-9]{6,}|sk-[A-Za-z0-9]{12,}/);
   assert.ok(Buffer.byteLength(s) < 8 * 1024, '技能正文别太长');
 });
+
+test('技能按机器分工：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity；云上的 Claude Code 不用', () => {
+  const s = fs.readFileSync(SKILL, 'utf8');
+  assert.ok(s.includes('ib agent prompt li --provider codex'), 'Codex 只派给 li');
+  assert.doesNotMatch(s, /ib agent prompt li2\b/, 'li2 不用 Codex');
+  assert.match(s, /ib exec --background li2 -- '[^']*dsh-task /, 'Harness 在 li2 上经 dsh-task 用');
+  for (const want of ['agy -p', '--dangerously-skip-permissions', '--output-format json', 'conversation_id', '--conversation', 'agy models', '--session-id'])
+    assert.ok(s.includes(want), want);
+  assert.match(s, /Claude Code[^\n]*不用/);
+  assert.doesNotMatch(s, /还没登录，别用/);
+});
