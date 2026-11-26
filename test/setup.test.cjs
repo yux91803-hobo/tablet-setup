@@ -69,8 +69,8 @@ const noSecrets=(r,extra=[])=>{const all=r.stdout+r.stderr;for(const s of [...SE
 
 test('语法对、不含任何令牌或 key；默认校验值就是从 li 核对过的那份安装包',()=>{
   assert.equal(spawnSync('bash',['-n',setup]).status,0);
-  // 仓库根目录整个由 Cloudflare Pages 发布，所以除了 .git 都要查；test/ 里是故意写的假 key，不算
-  const walk=d=>fs.readdirSync(d,{withFileTypes:true}).filter(e=>!(d===root&&['.git','test'].includes(e.name))).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]);
+  // 仓库根目录整个由 Cloudflare Pages 发布，所以除了 .git 都要查（测试里的假 key 也别写成真 key 的样子）
+  const walk=d=>fs.readdirSync(d,{withFileTypes:true}).filter(e=>!(d===root&&e.name==='.git')).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):[path.join(d,e.name)]);
   for(const f of walk(tablet)){const s=fs.readFileSync(f,'utf8');
     for(const re of [/ibssh_[A-Za-z0-9]{8,}/,/ibk_[A-Za-z0-9]{8,}/,/sk-[A-Za-z0-9]{16,}/])assert.ok(!re.test(s),path.relative(root,f)+' 里像有密钥：'+re);}
   const r=spawnSync('bash',['-c','source "$0"; echo "$ZIP_SIZE $ZIP_SHA256 $REMOTE_ZIP $INSTABOX_VERSION"',setup],{env:{PATH:process.env.PATH,LIMING_SETUP_LIB:'1'},encoding:'utf8'});
@@ -186,7 +186,7 @@ test('云端：没装 Codex 就不建它的配置；没有网关 key 照样装�
 test('清掉旧的云端任务插件：平板上卸载 liming-cloud、删掉旧的令牌和台账；云电脑上卸载 liming-lease、删掉写 key',t=>{
   const {d,env,run,read}=rig(t);
   fs.mkdirSync(path.join(env.LIMING_OLD_CLOUD_PLUGIN_DIR,'lib'),{recursive:true});fs.writeFileSync(path.join(env.LIMING_OLD_CLOUD_PLUGIN_DIR,'package.json'),'{}');
-  fs.mkdirSync(env.LIMING_OLD_CLOUD_DIR);fs.writeFileSync(path.join(env.LIMING_OLD_CLOUD_DIR,'secrets.json'),'{"machines":{"li2":{"sshTarget":"ibssh_oldtoken@x"}}}');
+  fs.mkdirSync(env.LIMING_OLD_CLOUD_DIR);fs.writeFileSync(path.join(env.LIMING_OLD_CLOUD_DIR,'secrets.json'),'{"machines":{"li2":{"sshTarget":"ibssh_old-token@x"}}}');
   for(const m of ['li2','li']){const h=path.join(d,'home-'+m);fs.mkdirSync(path.join(h,'.liming-lease/lib'),{recursive:true});fs.mkdirSync(path.join(h,'.liming-cloud'));fs.writeFileSync(path.join(h,'.liming-cloud/lease.key'),'old-write-key\n');}
   const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
   assert.ok(!fs.existsSync(env.LIMING_OLD_CLOUD_PLUGIN_DIR));assert.ok(!fs.existsSync(env.LIMING_OLD_CLOUD_DIR));
@@ -195,7 +195,7 @@ test('清掉旧的云端任务插件：平板上卸载 liming-cloud、删掉旧�
     assert.ok(!fs.existsSync(path.join(h,'.liming-lease')));assert.ok(!fs.existsSync(path.join(h,'.liming-cloud')));
     assert.ok(fs.readFileSync(path.join(h,'dsh.log'),'utf8').includes('plugin --profile web remove liming-lease'));}
   assert.match(r.stdout,/旧的云端任务插件已删掉/);
-  noSecrets(r,['ibssh_oldtoken','old-write-key']);
+  noSecrets(r,['ibssh_old-token','old-write-key']);
 });
 
 test('key 填反了（li 的填给 li2）：说清楚看不到 li2、不存，再问一次；三次都不对就不接这台',t=>{
