@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Liming 平板装机：在 DSH Go 的终端里（打开一个对话 → 全部功能 → 终端）运行
-#   apt-get update && apt-get install -y curl && curl -fsSL https://liming-work.com/tablet/setup.sh | bash
+#   apt-get update && apt-get install -y curl && curl -fsSL https://tablet.liming-work.com/setup.sh | bash
 # 装好随本机引擎启停的 WorkBuddy 网关和插件；再让平板上的 AI 能自己操作两台云电脑 li、li2：
 # 装 InstaBox 命令行和 ib（按机器选账号的 key），存两把 key（li2、li 所在账号各一把，只要 machines:read 和 machines:write），
 # 装技能「云电脑」；在 li2、li 上给 Codex 接好本机网关、装好浏览器命令行，清掉以前的云端任务插件。
 # 脚本里不含任何密钥；key 只存平板 ~/.config/liming/instabox/（权限 600），只经环境变量交给 instabox。可以重复运行。
 #   --dry-run  只列出要做的事    --skip-li  不接 li
-# 设计和说明：liming-work-site 仓库 docs/superpowers/specs/2026-11-26-tablet-cloud-direct-design.md、docs/tablet.md
+# 说明：https://github.com/yux91803-hobo/tablet-setup 的 README；设计见 liming-work-site 仓库 docs/superpowers/specs/2026-11-26-tablet-cloud-direct-design.md
 set +x
 set -euo pipefail
 
-BASE=${LIMING_BASE:-https://liming-work.com/tablet}
+BASE=${LIMING_BASE:-https://tablet.liming-work.com}
 HOME_DIR=${HOME:-/root}
 GW_DIR=${LIMING_GW_DIR:-/root/workbuddy-gateway}
 PLUGIN_DIR=${LIMING_PLUGIN_DIR:-/root/liming-gateway}

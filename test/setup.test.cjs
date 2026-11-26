@@ -78,6 +78,12 @@ test('语法对、不含任何令牌或 key；默认校验值就是从 li 核对
   assert.doesNotMatch(fs.readFileSync(setup,'utf8'),/liming-lease\/|CLOUD_FILES|LEASE_FILES|ibssh_/,'不再装旧插件、不再要 SSH 令牌');
 });
 
+test('默认从 https://tablet.liming-work.com 下载（这个仓库由 Cloudflare Pages 发布到那里）',()=>{
+  const r=spawnSync('bash',['-c','source "$0"; echo "$BASE"',setup],{env:{PATH:process.env.PATH,LIMING_SETUP_LIB:'1'},encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr);assert.equal(r.stdout.trim(),'https://tablet.liming-work.com');
+  assert.match(fs.readFileSync(setup,'utf8'),/curl -fsSL https:\/\/tablet\.liming-work\.com\/setup\.sh \| bash/,'开头的用法说明也是新地址');
+});
+
 test('下载到的是网站首页（不存在的路径回首页）或内容不对就停，不留半截文件',t=>{
   const {d,lib}=rig(t),fake=path.join(d,'site');fs.mkdirSync(fake);
   fs.writeFileSync(path.join(fake,'package.json'),'\n  <!doctype html><title>Liming</title> "name": "liming-gateway"');
