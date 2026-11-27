@@ -36,10 +36,10 @@ atomic_write() {
   mv -f "$tmp" "$dest"
 }
 
-# 远端执行统一入口：总是把 ~/.local/bin 放到 PATH 前面（agy、hcom 在那里）
+# 远端执行统一入口：总是把 ~/.local/bin 放到 PATH 前面（agy、hcom 在那里）；不读 stdin
 remote() {
   local m=$1 cmd=$2 t=${3:-$REMOTE_TIMEOUT}
-  "$IB" exec "$m" --timeout "$t" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; $cmd"
+  "$IB" exec "$m" --timeout "$t" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; $cmd" </dev/null
 }
 
 remote_stdin() {
@@ -50,7 +50,7 @@ remote_stdin() {
 # 查单台机器的 InstaBox 状态（不 exec、不叫醒），输出一行 JSON
 get_machine_info() {
   local m=$1 raw=''
-  if raw=$("$IB" get "$m" --json 2>/dev/null); then
+  if raw=$("$IB" get "$m" --json </dev/null 2>/dev/null); then
     printf '%s' "$raw" | python3 -c '
 import datetime, json, sys
 m = sys.argv[1]
@@ -773,11 +773,166 @@ print(json.dumps({
 ' "$m" "$ag_name" "$ag_dir" "$remote_url"
 }
 
+cmd_send() {
+  local m=${1:-}
+  check_machine "$m"
+  shift
+  [ $# -ge 1 ] || die_usage "send 需要消息文字或 --stdin"
+
+  local use_stdin=0 msg=''
+  if [ $# -eq 1 ] && [ "$1" = "--stdin" ]; then
+    use_stdin=1
+  else
+    if [ "$1" = "--" ]; then
+      shift
+      [ $# -ge 1 ] || die_usage "send 需要消息文字"
+    fi
+    local IFS=' '
+    msg="$*"
+  fi
+
+  local ag name qname
+  ag=$(require_crew_agent "$m")
+  name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+  printf -v qname '%q' "$name"
+
+  if [ "$use_stdin" = 1 ]; then
+    if ! remote_stdin "$m" "hcom send --from bigboss @$qname" >/dev/null; then
+      say_err "向 $m 发送消息失败"
+      exit 9
+    fi
+  else
+    if ! printf '%s' "$msg" | remote_stdin "$m" "hcom send --from bigboss @$qname" >/dev/null; then
+      say_err "向 $m 发送消息失败"
+      exit 9
+    fi
+  fi
+}
+
+cmd_stop() {
+  [ $# -eq 1 ] || die_usage "stop 只需指定一台机器"
+  local m=$1
+  check_machine "$m"
+  local ag name qname
+  ag=$(require_crew_agent "$m")
+  name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+  printf -v qname '%q' "$name"
+  if ! remote "$m" "hcom term inject $qname \"\$(printf '\\033')\"" >/dev/null; then
+    say_err "叫停 $m 失败"
+    exit 9
+  fi
+}
+
+cmd_type() {
+  local m=${1:-}
+  check_machine "$m"
+  shift
+  [ $# -ge 1 ] || die_usage "type 需要文字或 --stdin"
+
+  local use_stdin=0 msg=''
+  if [ $# -eq 1 ] && [ "$1" = "--stdin" ]; then
+    use_stdin=1
+  else
+    if [ "$1" = "--" ]; then
+      shift
+      [ $# -ge 1 ] || die_usage "type 需要文字"
+    fi
+    local IFS=' '
+    msg="$*"
+  fi
+
+  local ag name qname py_cmd
+  ag=$(require_crew_agent "$m")
+  name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+  printf -v qname '%q' "$name"
+  py_cmd="python3 -c 'import re,subprocess,sys; s=re.sub(r\"\\r?\\n\", \" \", sys.stdin.read()); subprocess.run([\"hcom\",\"term\",\"inject\",sys.argv[1],s,\"--enter\"], check=True)' $qname"
+
+  if [ "$use_stdin" = 1 ]; then
+    if ! remote_stdin "$m" "$py_cmd" >/dev/null; then
+      say_err "向 $m 终端输入失败"
+      exit 9
+    fi
+  else
+    if ! printf '%s' "$msg" | remote_stdin "$m" "$py_cmd" >/dev/null; then
+      say_err "向 $m 终端输入失败"
+      exit 9
+    fi
+  fi
+}
+
+cmd_approve() {
+  [ $# -eq 2 ] || die_usage "approve 用法：crew approve <li|li2> yes|no"
+  local m=$1 decision=$2 key
+  check_machine "$m"
+  case "$decision" in
+    yes) key=y ;;
+    no) key=n ;;
+    *) die_usage "approve 只认 yes 或 no，收到：$decision" ;;
+  esac
+
+  local ag name status qname term_raw
+  ag=$(require_crew_agent "$m")
+  name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+  status=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+  if [ "$status" != "blocked" ]; then
+    say_err "$m 当前不在等审批（状态：${status:-未知}），未按任何键"
+    exit 7
+  fi
+
+  printf -v qname '%q' "$name"
+  if ! term_raw=$(remote "$m" "hcom term $qname --json" 2>/dev/null); then
+    say_err "读取 $m 终端画面失败，未按任何键"
+    exit 9
+  fi
+
+  if ! printf '%s' "$term_raw" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+lines = d.get("lines") if isinstance(d, dict) else None
+if not isinstance(lines, list):
+    sys.exit(1)
+text = "\n".join(str(l) for l in lines)
+for forbid in ("Choose your color scheme", "Terms of Service", "Do you trust the contents of this project?"):
+    if forbid in text:
+        sys.exit(1)
+markers = (
+    "Run this command?",
+    "Do you want to proceed?",
+    "Allow calling this tool?",
+    "Allow creation of this file?",
+    "Allow access to this file?",
+    "Allow administrator elevation?",
+    "Allow remote debugging?",
+    "Requesting permission for:",
+    "Action Required",
+    "allow command?",
+)
+low = text.lower()
+ok = any((m in text) or (m.lower() in low and m == "allow command?") for m in markers)
+sys.exit(0 if ok else 1)
+'; then
+    say_err "$m 画面上认不出审批提示，未按任何键"
+    exit 7
+  fi
+
+  if ! remote "$m" "hcom term inject $qname $key" >/dev/null; then
+    say_err "向 $m 发送审批按键失败"
+    exit 9
+  fi
+}
+
 usage() {
   cat <<'EOF'
 用法：crew <子命令> [参数...]
   crew status [li|li2] [--json]
   crew start <li|li2> <目录> [--model M] [--effort E] [--prompt 文字]
+  crew send <li|li2> <文字…> | --stdin
+  crew stop <li|li2>
+  crew type <li|li2> <文字…> | --stdin
+  crew approve <li|li2> yes|no
   crew screen <li|li2> [--json]
   crew log <li|li2> [--last N] [--since ID] [--mark] [--json]
 EOF
@@ -790,6 +945,10 @@ main() {
   case "$sub" in
     status) cmd_status "$@" ;;
     start) cmd_start "$@" ;;
+    send) cmd_send "$@" ;;
+    stop) cmd_stop "$@" ;;
+    type) cmd_type "$@" ;;
+    approve) cmd_approve "$@" ;;
     screen) cmd_screen "$@" ;;
     log) cmd_log "$@" ;;
     -h|--help|help) usage ;;

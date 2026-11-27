@@ -1,0 +1,30 @@
+{
+ "cursor": [
+  16,
+  2
+ ],
+ "input_text": "",
+ "lines": [
+  "",
+  "● Requesting permission for: run_command",
+  "",
+  "  Run this command?",
+  "",
+  "    git push origin li2/demo",
+  "",
+  "  > Yes (y)",
+  "    No (n)",
+  "",
+  "  Press enter to confirm or esc to cancel",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "? for shortcuts                                      auto · Gemini 4 Neon · high",
+  ""
+ ],
+ "prompt_empty": false,
+ "ready": false,
+ "size": [
+  24,
+  80
+ ]
+}

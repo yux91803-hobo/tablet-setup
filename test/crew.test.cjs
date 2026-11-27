@@ -550,3 +550,147 @@ test('--model、--effort 原样传给 agy，团队身份说明 DSH 在 hcom 里�
   assert.match(promptVal, /TEAM\.md/);
   assert.match(promptVal, /@bigboss/);
 });
+
+test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令行参数里', (t) => {
+  const cases = [
+    '他说"好"',
+    '$HOME',
+    '`id`',
+    '-n 开头',
+    '第一行\n第二行',
+    '中文和 emoji 🚀✨',
+  ];
+  for (const msg of cases) {
+    const { run, ibLog, hcomLog } = rig(t, {
+      machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+      hcomFiles: { 'li2-list.json': makeCrewListFixture() },
+    });
+    const r = run(['send', 'li2', msg]);
+    assert.equal(r.status, 0, msg + ': ' + r.stderr);
+    const sendCall = hcomLog().find(c => c.args[0] === 'send');
+    assert.ok(sendCall, '应调用 hcom send');
+    assert.equal(sendCall.stdin, msg, 'stdin 必须逐字节一致：' + JSON.stringify(msg));
+    assert.ok(sendCall.args.includes('--from') && sendCall.args[sendCall.args.indexOf('--from') + 1] === 'bigboss');
+    assert.ok(sendCall.args.includes('@crew-keno'));
+    assert.ok(!sendCall.args.includes('--stdin'), 'hcom 0.7.31 走管道不传 --stdin');
+    assert.ok(!sendCall.args.join(' ').includes(msg), '文字不能出现在 hcom 参数里');
+    const sendIb = ibLog().find(l => l.includes('hcom send'));
+    assert.equal(sendIb, 'exec li2 --stdin --timeout 60 -- export PATH="$HOME/.local/bin:$PATH"; hcom send --from bigboss @crew-keno', 'ib 参数里只应有固定命令，不能含用户文字');
+  }
+  // --stdin 模式也逐字节原样到达
+  const raw = '单引号\'双引号"$HOME`id`\n-n 第二行\n';
+  const rig2 = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: { 'li2-list.json': makeCrewListFixture() },
+  });
+  const r2 = rig2.run(['send', 'li2', '--stdin'], { input: raw });
+  assert.equal(r2.status, 0, r2.stderr);
+  const s2 = rig2.hcomLog().find(c => c.args[0] === 'send');
+  assert.equal(s2.stdin, raw);
+  assert.equal(rig2.ibLog().find(l => l.includes('hcom send')), 'exec li2 --stdin --timeout 60 -- export PATH="$HOME/.local/bin:$PATH"; hcom send --from bigboss @crew-keno');
+});
+
+test('冷却时 send 以 5 退出，没 exec', (t) => {
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  const { run, ibLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'stopped', cooldownUntil: future } },
+  });
+  const r = run(['send', 'li2', '你好']);
+  assert.equal(r.status, 5, r.stderr);
+  assert.ok(!ibLog().some(l => l.startsWith('exec ')), '冷却时不能 exec');
+});
+
+test('没有 agent 时 send 以 6 退出', (t) => {
+  const { run } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: { 'li2-list.json': [] },
+  });
+  const r = run(['send', 'li2', '你好']);
+  assert.equal(r.status, 6, r.stderr);
+});
+
+test('stop 只发一个 ESC', (t) => {
+  const { run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: { 'li2-list.json': makeCrewListFixture() },
+  });
+  const r = run(['stop', 'li2']);
+  assert.equal(r.status, 0, r.stderr);
+  const inj = hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(inj.length, 1);
+  assert.deepEqual(inj[0].args, ['term', 'inject', 'crew-keno', '\x1b']);
+});
+
+test('type 把换行变成空格，再按回车，且文字不出现在 ib 参数里', (t) => {
+  const { run, ibLog, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: { 'li2-list.json': makeCrewListFixture() },
+  });
+  const text = '第一行 "$HOME"\n第二行 `id`';
+  const r = run(['type', 'li2', text]);
+  assert.equal(r.status, 0, r.stderr);
+  const inj = hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(inj.length, 1);
+  assert.deepEqual(inj[0].args, ['term', 'inject', 'crew-keno', '第一行 "$HOME" 第二行 `id`', '--enter']);
+  for (const line of ibLog()) {
+    assert.ok(!line.includes('第一行'), '文字不能出现在 ib 参数里');
+  }
+});
+
+test('approve：不在审批时以 7 退出，没按键；在审批时 yes 按 y，no 按 n', (t) => {
+  // 状态不是 blocked -> 退出 7，不按键
+  const idleRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening' }),
+      'li2-term.json': JSON.parse(readFixture('term-approval.json')),
+    },
+  });
+  const rIdle = idleRig.run(['approve', 'li2', 'yes']);
+  assert.equal(rIdle.status, 7, rIdle.stderr);
+  assert.ok(!idleRig.hcomLog().some(c => c.args[0] === 'term' && c.args[1] === 'inject'));
+
+  // 在审批时 yes 按 y
+  const yesRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'blocked' }),
+      'li2-term.json': JSON.parse(readFixture('term-approval.json')),
+    },
+  });
+  const rYes = yesRig.run(['approve', 'li2', 'yes']);
+  assert.equal(rYes.status, 0, rYes.stderr);
+  const injYes = yesRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(injYes.length, 1);
+  assert.deepEqual(injYes[0].args, ['term', 'inject', 'crew-keno', 'y']);
+
+  // 在审批时 no 按 n
+  const noRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'blocked' }),
+      'li2-term.json': JSON.parse(readFixture('term-approval.json')),
+    },
+  });
+  const rNo = noRig.run(['approve', 'li2', 'no']);
+  assert.equal(rNo.status, 0, rNo.stderr);
+  const injNo = noRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(injNo.length, 1);
+  assert.deepEqual(injNo[0].args, ['term', 'inject', 'crew-keno', 'n']);
+});
+
+test('approve 认不出画面时不按键，以 7 退出', (t) => {
+  // blocked 但是画面认不出审批提示（例如普通画面或条款/信任画面）
+  for (const fx of ['term-idle.json', 'term-terms.json', 'term-trust.json']) {
+    const r0 = rig(t, {
+      machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+      hcomFiles: {
+        'li2-list.json': makeCrewListFixture({ status: 'blocked' }),
+        'li2-term.json': JSON.parse(readFixture(fx)),
+      },
+    });
+    const res = r0.run(['approve', 'li2', 'yes']);
+    assert.equal(res.status, 7, fx + ' 应以 7 退出');
+    assert.ok(!r0.hcomLog().some(c => c.args[0] === 'term' && c.args[1] === 'inject'), fx + ' 不能按键');
+  }
+});
