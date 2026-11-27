@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const CREW = path.join(ROOT, 'crew.sh');
@@ -42,18 +42,71 @@ case "$sub" in
     ;;
   exec)
     m=""
+    bg=0
+    want_json=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --timeout) shift 2 ;;
         --stdin) shift ;;
-        --background) shift ;;
+        --background) bg=1; shift ;;
+        --json) want_json=1; shift ;;
         --) shift; break ;;
         -*) shift ;;
         *) [ -z "$m" ] && m=$1; shift ;;
       esac
     done
     cmd=\${1:-}
-    FAKE_MACHINE="$m" HOME="$FAKE_DIR/remote-home-$m" PATH="$FAKE_DIR/hcom-bin:$PATH" bash -c "$cmd"
+    if [ "$bg" = 1 ]; then
+      mkdir -p "$FAKE_DIR/jobs"
+      jid="job-\${m}-$$-\${RANDOM}"
+      (
+        set +e
+        FAKE_MACHINE="$m" HOME="$FAKE_DIR/remote-home-$m" PATH="$FAKE_DIR/hcom-bin:$PATH" bash -c "$cmd" > "$FAKE_DIR/jobs/$jid.log" 2>&1
+        rc=$?
+        printf '%s\\n' "$rc" > "$FAKE_DIR/jobs/$jid.rc.tmp"
+        mv -f "$FAKE_DIR/jobs/$jid.rc.tmp" "$FAKE_DIR/jobs/$jid.rc"
+      ) </dev/null >/dev/null 2>&1 &
+      pid=$!
+      printf '%s\\n' "$pid" > "$FAKE_DIR/jobs/$jid.pid"
+      if [ "$want_json" = 1 ]; then
+        printf '{"jobId":"%s","pid":%s}\\n' "$jid" "$pid"
+      else
+        printf '%s\\n' "$jid"
+      fi
+    else
+      FAKE_MACHINE="$m" HOME="$FAKE_DIR/remote-home-$m" PATH="$FAKE_DIR/hcom-bin:$PATH" bash -c "$cmd"
+    fi
+    ;;
+  jobs)
+    action=\${1:-}; shift || true
+    m=\${1:-}; shift || true
+    jid=\${1:-}; shift || true
+    case "$action" in
+      wait)
+        while [ ! -f "$FAKE_DIR/jobs/$jid.rc" ]; do
+          sleep 0.05
+        done
+        rc=$(cat "$FAKE_DIR/jobs/$jid.rc")
+        exit "$rc"
+        ;;
+      logs)
+        [ -f "$FAKE_DIR/jobs/$jid.log" ] && cat "$FAKE_DIR/jobs/$jid.log"
+        ;;
+      kill)
+        if [ -f "$FAKE_DIR/jobs/$jid.pid" ]; then
+          pid=$(cat "$FAKE_DIR/jobs/$jid.pid")
+          pkill -TERM -P "$pid" 2>/dev/null || true
+          kill -TERM "$pid" 2>/dev/null || true
+        fi
+        if [ ! -f "$FAKE_DIR/jobs/$jid.rc" ]; then
+          printf '143\\n' > "$FAKE_DIR/jobs/$jid.rc"
+        fi
+        ;;
+      *)
+        echo "fake ib jobs: unexpected action $action" >&2
+        exit 2
+        ;;
+    esac
     ;;
   *)
     echo "fake ib: unexpected subcommand: $sub" >&2
@@ -120,12 +173,36 @@ if (sub === 'events') {
   let raw = readOr('events.jsonl', '');
   let lines = raw.split('\\n').filter(Boolean).map(l => JSON.parse(l));
   const sqlIdx = args.indexOf('--sql');
-  if (sqlIdx !== -1 && args[sqlIdx + 1]) {
-    const m = /id\\s*>\\s*(\\d+)/i.exec(args[sqlIdx + 1]);
+  const sql = (sqlIdx !== -1 && args[sqlIdx + 1]) ? args[sqlIdx + 1] : '';
+  if (sql) {
+    const m = /id\\s*>\\s*(\\d+)/i.exec(sql);
     if (m) {
       const since = Number(m[1]);
       lines = lines.filter(e => Number(e.id) > since);
     }
+  }
+  const waitIdx = args.indexOf('--wait');
+  if (waitIdx !== -1) {
+    const waitSec = Number(args[waitIdx + 1] || '60');
+    const delayMs = Number(readOr('wait-delay-ms', '0'));
+    // 过滤：只保留 agent 发出的消息，或 listening/blocked 状态事件
+    const matched = lines.filter(e => {
+      if (e.type === 'message' && !String(e.instance || '').startsWith('ext_')) return true;
+      if (e.type === 'status' && e.data && (e.data.status === 'listening' || e.data.status === 'blocked')) return true;
+      return false;
+    });
+    if (matched.length > 0) {
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify(matched[0]) + '\\n');
+        process.exit(0);
+      }, delayMs);
+    } else {
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ timed_out: true }) + '\\n');
+        process.exit(1);
+      }, Math.max(50, waitSec * 1000));
+    }
+    return;
   }
   const lastIdx = args.indexOf('--last');
   if (lastIdx !== -1 && args[lastIdx + 1]) {
@@ -176,6 +253,10 @@ function rig(t, { machines = {}, hcomFiles = {} } = {}) {
     encoding: 'utf8',
     input: opts.input ?? '',
   });
+  const spawnCrew = (args, opts = {}) => spawn('bash', [CREW, ...args], {
+    env: { ...env, ...(opts.env || {}) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   const ibLog = () => {
     const p = path.join(d, 'ib.log');
     return fs.existsSync(p) ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean) : [];
@@ -184,7 +265,7 @@ function rig(t, { machines = {}, hcomFiles = {} } = {}) {
     const p = path.join(d, 'hcom.log');
     return fs.existsSync(p) ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
   };
-  return { d, stateDir, run, ibLog, hcomLog };
+  return { d, stateDir, run, spawnCrew, ibLog, hcomLog };
 }
 
 test('两台都睡着时 status 只调 ib get，不 exec', (t) => {
@@ -693,4 +774,109 @@ test('approve 认不出画面时不按键，以 7 退出', (t) => {
     assert.equal(res.status, 7, fx + ' 应以 7 退出');
     assert.ok(!r0.hcomLog().some(c => c.args[0] === 'term' && c.args[1] === 'inject'), fx + ' 不能按键');
   }
+});
+
+test('wait：一台发来消息就结束，打印那条事件，更新 last-id，并 kill 另一台的等待任务', (t) => {
+  const msgEv = { id: 52, instance: 'keno', type: 'message', ts: '2026-11-27T11:38:31', data: { from: 'keno', intent: 'request', text: '串口波特率用 115200 还是 9600？' } };
+  const { run, stateDir, ibLog } = rig(t, {
+    machines: {
+      li: { id: 'm_li', name: 'li', state: 'running' },
+      li2: { id: 'm_li2', name: 'li2', state: 'running' },
+    },
+    hcomFiles: {
+      'li-list.json': makeCrewListFixture({ name: 'crew-lino', base_name: 'lino' }),
+      'li2-list.json': makeCrewListFixture({ name: 'crew-keno', base_name: 'keno' }),
+      'li-events.jsonl': '',
+      'li2-events.jsonl': JSON.stringify(msgEv) + '\n',
+      'li2-wait-delay-ms': '150',
+    },
+  });
+  const r = run(['wait', 'li', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '5' } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.machine, 'li2');
+  assert.equal(out.event.id, 52);
+  assert.equal(out.event.data.text, '串口波特率用 115200 还是 9600？');
+  assert.equal(fs.readFileSync(path.join(stateDir, 'li2.last-id'), 'utf8').trim(), '52');
+  const kills = ibLog().filter(l => l.startsWith('jobs kill '));
+  assert.ok(kills.some(l => l.startsWith('jobs kill li ')), '应 kill 掉另一台 li 的等待任务：' + JSON.stringify(kills));
+});
+
+test('wait：超时以 8 退出，并 kill 所有等待任务', (t) => {
+  const { run, ibLog } = rig(t, {
+    machines: {
+      li: { id: 'm_li', name: 'li', state: 'running' },
+      li2: { id: 'm_li2', name: 'li2', state: 'running' },
+    },
+    hcomFiles: {
+      'li-list.json': makeCrewListFixture({ name: 'crew-lino', base_name: 'lino' }),
+      'li2-list.json': makeCrewListFixture({ name: 'crew-keno', base_name: 'keno' }),
+      'li-events.jsonl': '',
+      'li2-events.jsonl': '',
+    },
+  });
+  const r = run(['wait', 'li', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(r.status, 8, r.stdout + r.stderr);
+  const kills = ibLog().filter(l => l.startsWith('jobs kill '));
+  assert.ok(kills.some(l => l.startsWith('jobs kill li ')), '超时应 kill li');
+  assert.ok(kills.some(l => l.startsWith('jobs kill li2 ')), '超时应 kill li2');
+});
+
+test('wait：收到 SIGTERM 会 kill 所有等待任务', async (t) => {
+  const { spawnCrew, ibLog } = rig(t, {
+    machines: {
+      li: { id: 'm_li', name: 'li', state: 'running' },
+      li2: { id: 'm_li2', name: 'li2', state: 'running' },
+    },
+    hcomFiles: {
+      'li-list.json': makeCrewListFixture({ name: 'crew-lino', base_name: 'lino' }),
+      'li2-list.json': makeCrewListFixture({ name: 'crew-keno', base_name: 'keno' }),
+      'li-events.jsonl': '',
+      'li2-events.jsonl': '',
+    },
+  });
+  const child = spawnCrew(['wait', 'li', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '15' } });
+  // 等两个后台任务都启动进入 jobs wait
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000) {
+    const waits = ibLog().filter(l => l.startsWith('jobs wait '));
+    if (waits.length >= 2) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  assert.ok(ibLog().filter(l => l.startsWith('jobs wait ')).length >= 2, '两台都应进入 jobs wait');
+  child.kill('SIGTERM');
+  const code = await new Promise(resolve => child.on('exit', (c, sig) => resolve(c ?? sig)));
+  assert.notEqual(code, 0);
+  const kills = ibLog().filter(l => l.startsWith('jobs kill '));
+  assert.ok(kills.some(l => l.startsWith('jobs kill li ')), 'SIGTERM 应 kill li：' + JSON.stringify(kills));
+  assert.ok(kills.some(l => l.startsWith('jobs kill li2 ')), 'SIGTERM 应 kill li2：' + JSON.stringify(kills));
+});
+
+test('wait：已经看过的事件（id 不大于 last-id）不算', (t) => {
+  const oldEv = { id: 52, instance: 'keno', type: 'message', ts: '2026-11-27T11:38:31', data: { from: 'keno', text: '旧消息' } };
+  const { run, stateDir } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-events.jsonl': JSON.stringify(oldEv) + '\n',
+    },
+  });
+  fs.writeFileSync(path.join(stateDir, 'li2.last-id'), '52\n');
+  const r = run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(r.status, 8, '已看过的事件不算，应超时退出 8：' + r.stdout + r.stderr);
+});
+
+test('wait：全部在冷却以 5 退出；--timeout 超过 50 分钟以 2 退出', (t) => {
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  const { run, ibLog } = rig(t, {
+    machines: {
+      li: { id: 'm_li', name: 'li', state: 'stopped', cooldownUntil: future },
+      li2: { id: 'm_li2', name: 'li2', state: 'stopped', cooldownUntil: future },
+    },
+  });
+  const r = run(['wait', 'li', 'li2']);
+  assert.equal(r.status, 5, r.stderr);
+  assert.ok(!ibLog().some(l => l.startsWith('exec ')));
+  const bad = run(['wait', 'li2', '--timeout', '51']);
+  assert.equal(bad.status, 2);
 });

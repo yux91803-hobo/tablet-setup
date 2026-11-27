@@ -924,6 +924,192 @@ sys.exit(0 if ok else 1)
   fi
 }
 
+WAIT_M=()
+WAIT_JOB=()
+WAIT_PID=()
+WAIT_TMP=''
+
+wait_cleanup_jobs() {
+  local skip_idx=${1:--1} i
+  for i in "${!WAIT_PID[@]}"; do
+    if [ "$i" = "$skip_idx" ]; then continue; fi
+    kill "${WAIT_PID[$i]}" 2>/dev/null || true
+  done
+  for i in "${!WAIT_M[@]}"; do
+    if [ "$i" = "$skip_idx" ]; then continue; fi
+    "$IB" jobs kill "${WAIT_M[$i]}" "${WAIT_JOB[$i]}" </dev/null >/dev/null 2>&1 || true
+  done
+  if [ -n "$WAIT_TMP" ]; then
+    rm -rf "$WAIT_TMP"
+    WAIT_TMP=''
+  fi
+}
+
+cmd_wait() {
+  local timeout_min=30 req_m=() m arg seen
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)
+        [ $# -ge 2 ] || die_usage "--timeout 需要分钟数（1~50）"
+        if ! is_uint "$2" || [ "$2" -le 0 ] || [ "$2" -gt 50 ]; then
+          die_usage "--timeout 应为 1 到 50 之间的整数分钟：$2"
+        fi
+        timeout_min=$2; shift 2 ;;
+      -*) die_usage "wait 不认识的参数：$1" ;;
+      *)
+        check_machine "$1"
+        seen=0
+        for arg in "${req_m[@]}"; do
+          if [ "$arg" = "$1" ]; then seen=1; break; fi
+        done
+        if [ "$seen" = 0 ]; then req_m+=("$1"); fi
+        shift ;;
+    esac
+  done
+  [ ${#req_m[@]} -gt 0 ] || die_usage "wait 至少需要指定一台机器（li 或 li2）"
+
+  local wait_sec=$((timeout_min * 60))
+  if [ -n "${LIMING_CREW_WAIT_SECONDS:-}" ]; then
+    if ! is_uint "$LIMING_CREW_WAIT_SECONDS" || [ "$LIMING_CREW_WAIT_SECONDS" -le 0 ]; then
+      die_usage "LIMING_CREW_WAIT_SECONDS 应为正整数"
+    fi
+    wait_sec=$LIMING_CREW_WAIT_SECONDS
+  fi
+
+  local active_m=() active_base=() cooldown_cnt=0 info state raw ag base
+  for m in "${req_m[@]}"; do
+    info=$(get_machine_info "$m")
+    state=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))')
+    if [ "$state" = "cooldown" ]; then
+      cooldown_cnt=$((cooldown_cnt + 1))
+      continue
+    fi
+    if ! raw=$(remote "$m" "hcom list --json" 2>/dev/null); then
+      continue
+    fi
+    ag=$(printf '%s' "$raw" | parse_crew_agent "$m")
+    if [ "$ag" = "null" ] || [ -z "$ag" ]; then
+      continue
+    fi
+    base=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseName") or "")')
+    case "$base" in
+      ''|*[!A-Za-z0-9_-]*) continue ;;
+    esac
+    active_m+=("$m")
+    active_base+=("$base")
+  done
+
+  if [ ${#active_m[@]} -eq 0 ]; then
+    if [ "$cooldown_cnt" -eq "${#req_m[@]}" ]; then
+      say_err "要等的机器都在冷却中"
+      exit 5
+    fi
+    say_err "要等的机器上没有正在运行的 crew agent"
+    exit 6
+  fi
+
+  WAIT_M=()
+  WAIT_JOB=()
+  WAIT_PID=()
+  WAIT_TMP=$(mktemp -d)
+  local wait_done=()
+  trap 'wait_cleanup_jobs -1; exit 143' TERM
+  trap 'wait_cleanup_jobs -1; exit 130' INT
+
+  local i last_id sql qsql job_raw job_id
+  for i in "${!active_m[@]}"; do
+    m=${active_m[$i]}
+    base=${active_base[$i]}
+    last_id=0
+    if [ -r "$STATE_DIR/$m.last-id" ]; then
+      local saved
+      saved=$(tr -d '[:space:]' < "$STATE_DIR/$m.last-id")
+      if is_uint "$saved"; then last_id=$saved; fi
+    fi
+    sql="((type = 'message' AND (instance = '$base' OR msg_from = '$base')) OR (type = 'status' AND instance = '$base' AND status_val IN ('listening', 'blocked'))) AND id > $last_id"
+    printf -v qsql '%q' "$sql"
+    if ! job_raw=$("$IB" exec --background --json "$m" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; hcom events --wait $wait_sec --sql $qsql" </dev/null 2>/dev/null); then
+      wait_cleanup_jobs -1
+      trap - TERM INT
+      say_err "在 $m 上启动后台等待失败"
+      exit 9
+    fi
+    job_id=$(printf '%s' "$job_raw" | python3 -c '
+import json, sys
+s = sys.stdin.read().strip()
+try:
+    d = json.loads(s)
+    if isinstance(d, dict):
+        print(d.get("jobId") or d.get("id") or "")
+        sys.exit(0)
+except Exception:
+    pass
+print(s.split()[0] if s.split() else "")
+')
+    if [ -z "$job_id" ]; then
+      wait_cleanup_jobs -1
+      trap - TERM INT
+      say_err "在 $m 上启动后台等待未拿到任务号"
+      exit 9
+    fi
+    WAIT_M+=("$m")
+    WAIT_JOB+=("$job_id")
+    wait_done+=(0)
+    (
+      rc=0
+      "$IB" jobs wait "$m" "$job_id" --timeout "${wait_sec}s" </dev/null >/dev/null 2>&1 &
+      sub_pid=$!
+      trap 'kill "$sub_pid" 2>/dev/null || true; exit 143' TERM INT
+      wait "$sub_pid" || rc=$?
+      printf '%s\n' "$rc" > "$WAIT_TMP/$i.rc.tmp"
+      mv -f "$WAIT_TMP/$i.rc.tmp" "$WAIT_TMP/$i.rc"
+    ) &
+    WAIT_PID+=("$!")
+  done
+
+  local remaining=${#WAIT_M[@]} rc log_raw parsed_ev ev_id out_line
+  while [ "$remaining" -gt 0 ]; do
+    wait -n 2>/dev/null || true
+    for i in "${!WAIT_M[@]}"; do
+      if [ "${wait_done[$i]}" = 1 ]; then continue; fi
+      if [ ! -f "$WAIT_TMP/$i.rc" ]; then continue; fi
+      wait_done[i]=1
+      remaining=$((remaining - 1))
+      rc=$(tr -d '[:space:]' < "$WAIT_TMP/$i.rc")
+      if [ "$rc" = 0 ]; then
+        log_raw=$("$IB" jobs logs "${WAIT_M[$i]}" "${WAIT_JOB[$i]}" </dev/null 2>/dev/null || true)
+        parsed_ev=$(printf '%s' "$log_raw" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"): continue
+    try:
+        ev = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(ev, dict) and not ev.get("timed_out") and isinstance(ev.get("id"), int):
+        print(json.dumps(ev, ensure_ascii=False))
+        sys.exit(0)
+')
+        if [ -n "$parsed_ev" ]; then
+          ev_id=$(printf '%s' "$parsed_ev" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          atomic_write "$STATE_DIR/${WAIT_M[$i]}.last-id" "${ev_id}"$'\n'
+          out_line=$(python3 -c 'import json,sys; print(json.dumps({"machine": sys.argv[1], "event": json.loads(sys.argv[2])}, ensure_ascii=False))' "${WAIT_M[$i]}" "$parsed_ev")
+          wait_cleanup_jobs "$i"
+          trap - TERM INT
+          printf '%s\n' "$out_line"
+          return 0
+        fi
+      fi
+    done
+  done
+
+  wait_cleanup_jobs -1
+  trap - TERM INT
+  say_err "等待超时（${wait_sec} 秒内无新事件）"
+  exit 8
+}
+
 usage() {
   cat <<'EOF'
 用法：crew <子命令> [参数...]
@@ -935,6 +1121,7 @@ usage() {
   crew approve <li|li2> yes|no
   crew screen <li|li2> [--json]
   crew log <li|li2> [--last N] [--since ID] [--mark] [--json]
+  crew wait <li|li2>... [--timeout 分钟]
 EOF
 }
 
@@ -951,6 +1138,7 @@ main() {
     approve) cmd_approve "$@" ;;
     screen) cmd_screen "$@" ;;
     log) cmd_log "$@" ;;
+    wait) cmd_wait "$@" ;;
     -h|--help|help) usage ;;
     *) die_usage "不认识的子命令：$sub" ;;
   esac
