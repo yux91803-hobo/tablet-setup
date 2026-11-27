@@ -143,7 +143,7 @@ function memberRow(row) {
   const statusText = ag.status === 'active'
     ? (cl ? `干活中（${cl}）` : '干活中')
     : ag.status === 'listening'
-      ? '空闲'
+      ? (ag.stopped ? '空闲（刚叫停）' : '空闲')
       : ag.status === 'blocked'
         ? '等审批'
         : (ag.status || '在线');

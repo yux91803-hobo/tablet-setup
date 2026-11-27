@@ -125,7 +125,7 @@ ensure_not_cooldown() {
 parse_crew_agent() {
   local m=$1
   python3 -c '
-import json, os, sys
+import json, os, sys, time
 m, state_dir = sys.argv[1], sys.argv[2]
 try:
     items = json.load(sys.stdin)
@@ -170,17 +170,31 @@ if remote_url is None:
                     break
         except Exception:
             pass
+raw_status = str(chosen.get("status") or "")
+age_sec = int(chosen.get("status_age_seconds") or 0)
+stopped = False
+if raw_status == "active":
+    stopped_file = os.path.join(state_dir, f"{m}.stopped-at")
+    if os.path.isfile(stopped_file):
+        try:
+            stopped_at = float(open(stopped_file, encoding="utf-8").read().strip())
+            if (time.time() - age_sec) < stopped_at:
+                stopped = True
+        except Exception:
+            pass
 out = {
     "name": name,
     "baseName": base,
-    "status": str(chosen.get("status") or ""),
+    "status": "listening" if stopped else raw_status,
     "context": str(chosen.get("status_context") or ""),
     "detail": str(chosen.get("status_detail") or ""),
-    "ageSeconds": int(chosen.get("status_age_seconds") or 0),
+    "ageSeconds": age_sec,
     "unread": int(chosen.get("unread_count") or 0),
     "dir": str(chosen.get("directory") or ""),
     "remoteUrl": remote_url,
 }
+if stopped:
+    out["stopped"] = True
 print(json.dumps(out, ensure_ascii=False))
 ' "$m" "$STATE_DIR"
 }
@@ -237,7 +251,10 @@ import json, sys
 info = json.loads(sys.argv[1])
 ag = json.loads(sys.argv[2])
 if isinstance(ag, dict):
-    ag = {k: ag[k] for k in ("name", "status", "context", "detail", "ageSeconds", "unread", "dir", "remoteUrl")}
+    keep = {k: ag[k] for k in ("name", "status", "context", "detail", "ageSeconds", "unread", "dir", "remoteUrl")}
+    if ag.get("stopped"):
+        keep["stopped"] = True
+    ag = keep
 info["agent"] = ag
 print(json.dumps(info, ensure_ascii=False))
 ' "$info" "$ag")
@@ -330,7 +347,10 @@ for row in d.get("machines") or []:
                 else:
                     print(f"{m}：干活中 · {when}")
             elif ast == "listening":
-                print(f"{m}：空闲 · {when}")
+                if ag.get("stopped"):
+                    print(f"{m}：空闲（刚叫停）· {when}")
+                else:
+                    print(f"{m}：空闲 · {when}")
             elif ast == "blocked":
                 print(f"{m}：等审批 · {when}")
             else:
@@ -551,7 +571,10 @@ import datetime, json, os, sys
 m, state, cd, ag_raw, state_dir = sys.argv[1:6]
 ag = json.loads(ag_raw)
 if isinstance(ag, dict):
-    ag = {k: ag[k] for k in ("name", "status", "context", "detail", "ageSeconds", "unread", "dir", "remoteUrl")}
+    keep = {k: ag[k] for k in ("name", "status", "context", "detail", "ageSeconds", "unread", "dir", "remoteUrl")}
+    if ag.get("stopped"):
+        keep["stopped"] = True
+    ag = keep
 st_file = os.path.join(state_dir, "status.json")
 by_m = {}
 if os.path.isfile(st_file):
@@ -913,11 +936,44 @@ cmd_stop() {
   [ $# -eq 1 ] || die_usage "stop 只需指定一台机器"
   local m=$1
   check_machine "$m"
-  local ag name qname
+  local ag name qname stop_poll stop_wait qpoll qwait stop_py rc=0 now_epoch
   ag=$(require_crew_agent "$m")
   name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
   printf -v qname '%q' "$name"
-  if ! remote "$m" "hcom term inject $qname \"\$(printf '\\033')\"" >/dev/null; then
+  stop_poll=${LIMING_CREW_STOP_POLL:-1}
+  stop_wait=${LIMING_CREW_STOP_WAIT:-8}
+  printf -v qpoll '%q' "$stop_poll"
+  printf -v qwait '%q' "$stop_wait"
+  stop_py='import json, subprocess, sys, time
+name, poll_sec, wait_sec = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+r = subprocess.run(["hcom", "term", "inject", name, "\x1b"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+if r.returncode != 0:
+    sys.exit(2)
+deadline = time.monotonic() + wait_sec
+while True:
+    t = subprocess.run(["hcom", "term", name, "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if t.returncode == 0:
+        try:
+            d = json.loads(t.stdout)
+            if isinstance(d, dict) and d.get("ready") is True:
+                sys.exit(0)
+        except Exception:
+            pass
+    rem = deadline - time.monotonic()
+    if rem <= 0:
+        break
+    time.sleep(min(poll_sec, rem))
+sys.exit(10)'
+  remote "$m" "python3 -c '$stop_py' $qname $qpoll $qwait" >/dev/null || rc=$?
+  if [ "$rc" = 0 ]; then
+    now_epoch=$(python3 -c 'import time; print(int(time.time()))')
+    atomic_write "$STATE_DIR/$m.stopped-at" "${now_epoch}"$'\n'
+    printf '已叫停 %s\n' "$m"
+    return 0
+  elif [ "$rc" = 10 ]; then
+    say_err "已发出叫停，$m 还没停下来，用 crew screen 看看"
+    exit 9
+  else
     say_err "叫停 $m 失败"
     exit 9
   fi
@@ -1076,7 +1132,7 @@ cmd_wait() {
     wait_sec=$LIMING_CREW_WAIT_SECONDS
   fi
 
-  local active_m=() active_base=() cooldown_cnt=0 info state raw ag base
+  local active_m=() active_base=() cooldown_cnt=0 info state raw ag base ag_stopped
   for m in "${req_m[@]}"; do
     info=$(get_machine_info "$m")
     state=$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","unknown"))')
@@ -1095,6 +1151,17 @@ cmd_wait() {
     case "$base" in
       ''|*[!A-Za-z0-9_-]*) continue ;;
     esac
+    ag_stopped=$(printf '%s' "$ag" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("stopped") else "0")')
+    if [ "$ag_stopped" = 1 ]; then
+      python3 -c '
+import datetime, json, sys
+m, base = sys.argv[1], sys.argv[2]
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+ev = {"id": None, "instance": base, "type": "status", "ts": ts, "data": {"status": "listening", "context": "crew:stopped", "detail": ""}}
+print(json.dumps({"machine": m, "event": ev, "stopped": True}, ensure_ascii=False))
+' "$m" "$base"
+      return 0
+    fi
     active_m+=("$m")
     active_base+=("$base")
   done

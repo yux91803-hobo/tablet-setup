@@ -88,6 +88,28 @@ test('panelData 把 starting 状态显示为「正在叫醒」', async () => {
   assert.match(data.selectedSummary, /正在叫醒/);
 });
 
+test('panelData 在 agent.stopped 为 true 时显示「空闲（刚叫停）」', async () => {
+  const { panelData } = await loadViews();
+  const data = panelData({
+    status: {
+      at: '2026-11-27T11:40:00Z',
+      machines: [
+        {
+          machine: 'li2',
+          state: 'running',
+          cooldownUntil: null,
+          agent: { name: 'crew-keno', status: 'listening', stopped: true, context: 'tool:run_command', detail: '', ageSeconds: 40, unread: 0, dir: '/data/workspace/demo', remoteUrl: null },
+        },
+      ],
+    },
+    selected: 'li2',
+    screen: null,
+    log: [],
+  });
+  const li2 = data.members.find(m => m.title.startsWith('li2'));
+  assert.equal(li2.title, 'li2 · 空闲（刚叫停）');
+});
+
 test('panelData 把 term-idle.json、events.jsonl 整理成面板数据，不超过 30 KiB（含压力测试）', async () => {
   const { panelData } = await loadViews();
   const term = JSON.parse(readFixture('term-idle.json'));

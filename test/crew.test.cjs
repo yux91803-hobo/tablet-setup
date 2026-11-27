@@ -847,16 +847,92 @@ test('没有 agent 时 send 以 6 退出', (t) => {
   assert.equal(r.status, 6, r.stderr);
 });
 
-test('stop 只发一个 ESC', (t) => {
-  const { run, hcomLog } = rig(t, {
+test('stop 只发一个 ESC，等到 ready 后写 stopped-at 并退出 0', (t) => {
+  const notReady = { ready: false, prompt_empty: false, input_text: '', lines: ['Running command...'], cursor: [1, 0], size: [24, 80] };
+  const readyTerm = JSON.parse(readFixture('term-idle.json'));
+  const { run, hcomLog, stateDir } = rig(t, {
     machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
-    hcomFiles: { 'li2-list.json': makeCrewListFixture() },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active', status_context: 'tool:run_command' }),
+      'li2-term-seq.json': [notReady, readyTerm],
+    },
   });
-  const r = run(['stop', 'li2']);
-  assert.equal(r.status, 0, r.stderr);
+  const before = Math.floor(Date.now() / 1000);
+  const r = run(['stop', 'li2'], { env: { LIMING_CREW_STOP_POLL: '0.05', LIMING_CREW_STOP_WAIT: '0.5' } });
+  const after = Math.floor(Date.now() / 1000);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /已叫停 li2/);
   const inj = hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
   assert.equal(inj.length, 1);
   assert.deepEqual(inj[0].args, ['term', 'inject', 'crew-keno', '\x1b']);
+  const stoppedFile = path.join(stateDir, 'li2.stopped-at');
+  assert.ok(fs.existsSync(stoppedFile), '等到 ready 后应写出 li2.stopped-at');
+  const ts = Number(fs.readFileSync(stoppedFile, 'utf8').trim());
+  assert.ok(ts >= before && ts <= after + 1, 'stopped-at 应为当前 epoch 秒：' + ts);
+});
+
+test('stop 等不到 ready 时退出 9，不写 stopped-at', (t) => {
+  const notReady = { ready: false, prompt_empty: false, input_text: '', lines: ['Still running...'], cursor: [1, 0], size: [24, 80] };
+  const { run, stateDir } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active' }),
+      'li2-term.json': notReady,
+    },
+  });
+  const r = run(['stop', 'li2'], { env: { LIMING_CREW_STOP_POLL: '0.05', LIMING_CREW_STOP_WAIT: '0.15' } });
+  assert.equal(r.status, 9, r.stdout + r.stderr);
+  assert.match(r.stdout + r.stderr, /已发出叫停，li2 还没停下来，用 crew screen 看看/);
+  assert.ok(!fs.existsSync(path.join(stateDir, 'li2.stopped-at')), '没停下来不应写 stopped-at');
+});
+
+test('stopped-at 比状态新时显示「空闲（刚叫停）」且 wait 立即按空闲返回；比状态旧时照常显示「干活中」', (t) => {
+  const now = Math.floor(Date.now() / 1000);
+  // 情况 1：stopped-at（5 秒前）比 active 状态开始时间（40 秒前）新
+  const staleRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active', status_context: 'tool:run_command', status_age_seconds: 40 }),
+    },
+  });
+  fs.writeFileSync(path.join(staleRig.stateDir, 'li2.stopped-at'), `${now - 5}\n`);
+  const txt1 = staleRig.run(['status', 'li2']);
+  assert.equal(txt1.status, 0, txt1.stderr);
+  assert.match(txt1.stdout, /li2：空闲（刚叫停）/);
+  const json1 = staleRig.run(['status', 'li2', '--json']);
+  assert.equal(json1.status, 0, json1.stderr);
+  const ag1 = JSON.parse(json1.stdout).machines[0].agent;
+  assert.equal(ag1.status, 'listening');
+  assert.equal(ag1.stopped, true);
+  const cached1 = JSON.parse(fs.readFileSync(path.join(staleRig.stateDir, 'status.json'), 'utf8'));
+  assert.equal(cached1.machines[0].agent.status, 'listening');
+  assert.equal(cached1.machines[0].agent.stopped, true);
+
+  // wait 开始时发现 active 早于 stopped-at：马上按空闲返回 0，不启后台 exec
+  const w = staleRig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '5' } });
+  assert.equal(w.status, 0, w.stdout + w.stderr);
+  const wOut = JSON.parse(w.stdout);
+  assert.equal(wOut.machine, 'li2');
+  assert.equal(wOut.event.data.status, 'listening');
+  assert.equal(wOut.stopped, true);
+  assert.ok(!staleRig.ibLog().some(l => l.includes('--background')), '早于 stopped-at 时 wait 应直接返回，不启后台等待');
+
+  // 情况 2：stopped-at（60 秒前）比 active 状态开始时间（5 秒前）旧 -> 照常显示干活中
+  const freshRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active', status_context: 'tool:run_command', status_age_seconds: 5 }),
+    },
+  });
+  fs.writeFileSync(path.join(freshRig.stateDir, 'li2.stopped-at'), `${now - 60}\n`);
+  const txt2 = freshRig.run(['status', 'li2']);
+  assert.equal(txt2.status, 0, txt2.stderr);
+  assert.match(txt2.stdout, /li2：干活中（跑命令）/);
+  const json2 = freshRig.run(['status', 'li2', '--json']);
+  assert.equal(json2.status, 0, json2.stderr);
+  const ag2 = JSON.parse(json2.stdout).machines[0].agent;
+  assert.equal(ag2.status, 'active');
+  assert.equal(ag2.stopped, undefined);
 });
 
 test('type 把换行变成空格，再按回车，且文字不出现在 ib 参数里', (t) => {
