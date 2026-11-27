@@ -42,13 +42,27 @@ function makeZip(file){
   assert.equal(r.status,0,String(r.stderr));
   const buf=fs.readFileSync(file);return {size:String(buf.length),sha:crypto.createHash('sha256').update(buf).digest('hex')};
 }
-// 一台「云电脑」的 HOME：有 npm（装 playwright-cli 时放一个假的进 bin）、可选 Antigravity
-function remoteHome(dir,m,{agy='logged-in'}={}){
-  const h=path.join(dir,'home-'+m),bin=path.join(h,'bin');
+// 一台「云电脑」的 HOME：有 npm（装 playwright-cli 时放一个假的进 bin）、可选 Antigravity、uv、hcom、gh
+function remoteHome(dir,m,{agy='logged-in',hcom='0.7.31',uv=true,gh='logged-in',settings=null}={}){
+  const h=path.join(dir,'home-'+m),bin=path.join(h,'bin'),lbin=path.join(h,'.local/bin');
   for(const p of ['.local/bin','bin'])fs.mkdirSync(path.join(h,p),{recursive:true});
   // Antigravity 命令行装在 ~/.local/bin/agy；登录后 ~/.gemini/antigravity-cli 里有令牌文件
-  if(agy){fs.writeFileSync(path.join(h,'.local/bin/agy'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  if(agy){fs.writeFileSync(path.join(lbin,'agy'),'#!/bin/sh\nexit 0\n',{mode:0o755});
     if(agy==='logged-in'){fs.mkdirSync(path.join(h,'.gemini/antigravity-cli'),{recursive:true});fs.writeFileSync(path.join(h,'.gemini/antigravity-cli/antigravity-oauth-token'),'fake-token\n',{mode:0o600});}}
+  if(settings!==null){
+    fs.mkdirSync(path.join(h,'.gemini/antigravity-cli'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.gemini/antigravity-cli/settings.json'),typeof settings==='string'?settings:JSON.stringify(settings,null,2),{mode:0o600});
+  }
+  if(hcom){
+    fs.writeFileSync(path.join(lbin,'hcom'),`#!/bin/sh\necho "hcom ${hcom}"\n`,{mode:0o755});
+  }
+  if(uv){
+    fs.writeFileSync(path.join(bin,'uv'),`#!/bin/sh\necho "uv $*" >> "$HOME/remote.log"\ncase "$*" in *"tool install"*hcom==*) ver=\${*##*hcom==}; ver=\${ver%% *}; printf '#!/bin/sh\\necho "hcom %s"\\n' "$ver" > "$HOME/.local/bin/hcom"; chmod +x "$HOME/.local/bin/hcom";; esac\n`,{mode:0o755});
+  }
+  if(gh){
+    const rc=gh==='logged-in'?0:1;
+    fs.writeFileSync(path.join(bin,'gh'),`#!/bin/sh\necho "gh $*" >> "$HOME/remote.log"\nexit ${rc}\n`,{mode:0o755});
+  }
   fs.writeFileSync(path.join(bin,'npm'),`#!/bin/sh\necho "npm $*" >> "$HOME/remote.log"\ncase "$*" in *@playwright/cli*) printf '#!/bin/sh\\necho "playwright-cli $*" >> "$HOME/remote.log"\\n' > "${bin}/playwright-cli"; chmod +x "${bin}/playwright-cli";; esac\n`,{mode:0o755});
   return h;
 }
@@ -288,4 +302,58 @@ test('装机结果里说明哪台的 Antigravity 还没登录、哪台没装',t=
   const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
   assert.match(r.stdout,/li2：准备好了.*Antigravity 还没登录/);
   assert.match(r.stdout,/li：准备好了.*没装 Antigravity/);
+});
+
+test('云端准备：已是 0.7.31 时不重装 hcom；缺失或版本不对时固定装 hcom==0.7.31',t=>{
+  const {d,run}=rig(t);
+  // li2 已有 0.7.31，li 没装 hcom
+  fs.rmSync(path.join(d,'home-li/.local/bin/hcom'));
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  const logLi2=fs.readFileSync(path.join(d,'home-li2/remote.log'),'utf8');
+  assert.doesNotMatch(logLi2,/uv tool install/,'已是 0.7.31 不应重装');
+  const logLi=fs.readFileSync(path.join(d,'home-li/remote.log'),'utf8');
+  assert.match(logLi,/uv tool install --force hcom==0\.7\.31/,'版本必须钉死 0.7.31');
+  assert.match(r.stdout,/li2：准备好了\n/);
+  assert.match(r.stdout,/li：准备好了\n/);
+});
+
+test('云端准备：放行 hcom 的规则只加一次，原有设置不动，重跑结果相同',t=>{
+  const {d,run}=rig(t);
+  const cfgPath=path.join(d,'home-li2/.gemini/antigravity-cli/settings.json');
+  const orig={
+    permissions:{allow:['command(git status)','command(hcom send)'],deny:['command(rm -rf /)']},
+    trustedWorkspaces:['/data/workspace/demo'],
+    customFlag:true,
+  };
+  fs.writeFileSync(cfgPath,JSON.stringify(orig,null,2),{mode:0o600});
+  const r1=run('--skip-li');assert.equal(r1.status,0,r1.stdout+r1.stderr);
+  const after1=JSON.parse(fs.readFileSync(cfgPath,'utf8'));
+  assert.deepEqual(after1.trustedWorkspaces,orig.trustedWorkspaces,'原有 trustedWorkspaces 不动');
+  assert.equal(after1.customFlag,true,'原有自定义字段不动');
+  assert.deepEqual(after1.permissions.deny,orig.permissions.deny,'原有 deny 不动');
+  assert.ok(after1.permissions.allow.includes('command(git status)'),'原有 allow 不动');
+  assert.ok(after1.permissions.allow.includes(`write_file(${path.join(d,'home-li2/.hcom')})`),'应挂 ~/.hcom 读写进沙箱');
+  assert.ok(after1.permissions.allow.includes(`read_file(${path.join(d,'home-li2/.local/bin')})`),'应挂 ~/.local/bin 只读进沙箱');
+  assert.ok(after1.permissions.allow.includes(`read_file(${path.join(d,'home-li2/.local/share/uv/tools/hcom')})`),'应挂 ~/.local/share/uv/tools/hcom 只读进沙箱');
+  assert.ok(!after1.permissions.allow.includes('command(hcom)'),'不加一刀切的 command(hcom)');
+  assert.ok(!after1.permissions.allow.includes(`read_file(${path.join(d,'home-li2/.local')})`),'不放开整个 ~/.local');
+  // 重跑：不重复加规则，内容完全一致
+  fs.writeFileSync(path.join(d,'tty'),'\n');
+  const r2=run('--skip-li');assert.equal(r2.status,0,r2.stdout+r2.stderr);
+  const after2=JSON.parse(fs.readFileSync(cfgPath,'utf8'));
+  assert.deepEqual(after2,after1,'重跑结果应幂等');
+  assert.equal(after2.permissions.allow.filter(x=>x===`write_file(${path.join(d,'home-li2/.hcom')})`).length,1,'不重复添加');
+});
+
+test('云端准备：没登录 GitHub 时汇总提示 gh auth login；不碰谷歌登录令牌文件',t=>{
+  const {d,run}=rig(t);
+  const tok=path.join(d,'home-li2/.gemini/antigravity-cli/antigravity-oauth-token');
+  const oldMtime=new Date('2026-01-01T00:00:00Z');
+  fs.utimesSync(tok,oldMtime,oldMtime);
+  // li 上 gh 未登录
+  fs.writeFileSync(path.join(d,'home-li/bin/gh'),'#!/bin/sh\nexit 1\n',{mode:0o755});
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/li：准备好了；GitHub 还没登录（在这台的 Computer 页签运行 gh auth login）/);
+  assert.equal(fs.readFileSync(tok,'utf8'),'fake-token\n','令牌内容不能变');
+  assert.equal(fs.statSync(tok).mtimeMs,oldMtime.getTime(),'令牌修改时间不能变');
 });

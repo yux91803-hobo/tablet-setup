@@ -24,6 +24,7 @@ DSH=${LIMING_DSH:-dsh}
 APT=${LIMING_APT:-apt-get}
 TTY=${LIMING_TTY:-/dev/tty}
 INSTABOX_VERSION=0.8.407
+HCOM_VERSION=0.7.31
 PLAYWRIGHT_CLI_VERSION=0.1.25
 VERSION=v2.0.8
 # 原版发布包的大小和 SHA-256，2026-11-25 在 li 上核对过（与 releases/SHA256SUMS.v2.0.8 一致）。
@@ -190,23 +191,94 @@ install_tools() {
 }
 
 # 在云电脑上跑的准备脚本（经 instabox exec --stdin 送过去）。每一项各自报一行「LMC 项 结果」，一项失败不影响别的项。
-# 只装浏览器命令行，以及检查 Antigravity 装没装、登没登录。不碰账号和令牌。
+# 做这几项：固定装 hcom 0.7.31、查 Antigravity 登录、在 agy 设置里加 hcom 放行规则、查 gh 登录、装浏览器命令行。
+# 不碰谷歌账号和登录令牌文件（~/.gemini/antigravity-cli/antigravity-oauth-token）。
 remote_script() {
   local machine=$1
-  printf 'set +x\nLIMING_MACHINE=%q\nPLAYWRIGHT_CLI_VERSION=%q\n' "$machine" "$PLAYWRIGHT_CLI_VERSION"
+  printf 'set +x\nLIMING_MACHINE=%q\nHCOM_VERSION=%q\nPLAYWRIGHT_CLI_VERSION=%q\n' "$machine" "$HCOM_VERSION" "$PLAYWRIGHT_CLI_VERSION"
   cat <<'END'
 set -u
 umask 077
+export PATH="$HOME/.local/bin:$PATH"
 st() { printf 'LMC %s %s\n' "$1" "$2"; }
-# 1. 浏览器命令行（Playwright CLI）和它的 Chromium
-if ! command -v playwright-cli >/dev/null 2>&1; then npm i -g "@playwright/cli@$PLAYWRIGHT_CLI_VERSION" </dev/null >/dev/null 2>&1 || true; fi
-if command -v playwright-cli >/dev/null 2>&1 && playwright-cli install-browser chromium </dev/null >/dev/null 2>&1; then st browser ok; else st browser failed; fi
-# 2. Antigravity（两台都用）：只看装没装、登没登录；账号由站长自己在那台上登
+# 1. hcom 固定版本
+if command -v hcom >/dev/null 2>&1 && hcom --version </dev/null 2>/dev/null | grep -qF "$HCOM_VERSION"; then
+  st hcom ok
+elif command -v uv >/dev/null 2>&1; then
+  if uv tool install --force "hcom==$HCOM_VERSION" </dev/null >/dev/null 2>&1 \
+     && command -v hcom >/dev/null 2>&1 \
+     && hcom --version </dev/null 2>/dev/null | grep -qF "$HCOM_VERSION"; then
+    st hcom installed
+  else
+    st hcom failed
+  fi
+else
+  st hcom no-uv
+fi
+# 2. Antigravity：只看装没装、登没登录；账号由站长自己在那台上登
 if [ -x "$HOME/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
   if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then st antigravity ok; else st antigravity logged-out; fi
 else
   st antigravity none
 fi
+# 3. Antigravity 沙箱放行 hcom 数据与程序目录（个人账号不认 unsandboxed，改用 permissions.allow 最小目录挂载；子命令放行沿用 hcom 自带的 command(hcom ...)）
+if python3 - <<'PY' >/dev/null 2>&1
+import json, os, sys
+home = os.path.expanduser('~')
+cfg_dir = os.path.join(home, '.gemini', 'antigravity-cli')
+cfg_path = os.path.join(cfg_dir, 'settings.json')
+rules = [
+    f'write_file({os.path.join(home, ".hcom")})',
+    f'read_file({os.path.join(home, ".local", "bin")})',
+    f'read_file({os.path.join(home, ".local", "share", "uv", "tools", "hcom")})',
+]
+if os.path.exists(cfg_path):
+    with open(cfg_path, encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        sys.exit(1)
+else:
+    data = {}
+perms = data.get('permissions')
+if perms is None:
+    perms = {}
+    data['permissions'] = perms
+elif not isinstance(perms, dict):
+    sys.exit(1)
+allow = perms.get('allow')
+if allow is None:
+    allow = []
+    perms['allow'] = allow
+elif not isinstance(allow, list):
+    sys.exit(1)
+changed = not os.path.exists(cfg_path)
+for r in rules:
+    if r not in allow:
+        allow.append(r)
+        changed = True
+if changed:
+    os.makedirs(cfg_dir, exist_ok=True)
+    tmp = cfg_path + f'.tmp.{os.getpid()}'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, cfg_path)
+PY
+then
+  st sandbox ok
+else
+  st sandbox failed
+fi
+# 4. GitHub CLI 登录检查
+if command -v gh >/dev/null 2>&1; then
+  if gh auth status </dev/null >/dev/null 2>&1; then st gh ok; else st gh logged-out; fi
+else
+  st gh none
+fi
+# 5. 浏览器命令行（Playwright CLI）和它的 Chromium
+if ! command -v playwright-cli >/dev/null 2>&1; then npm i -g "@playwright/cli@$PLAYWRIGHT_CLI_VERSION" </dev/null >/dev/null 2>&1 || true; fi
+if command -v playwright-cli >/dev/null 2>&1 && playwright-cli install-browser chromium </dev/null >/dev/null 2>&1; then st browser ok; else st browser failed; fi
 echo "LMC done"
 END
 }
@@ -225,11 +297,21 @@ remote_setup() {
     return 0
   fi
   lmc() { printf '%s\n' "$out" | sed -n "s/^LMC $1 //p" | tail -n 1; }
-  [ "$(lmc browser)" = ok ] || notes="$notes；浏览器命令行没装好，稍后重跑"
+  case "$(lmc hcom)" in
+    ok|installed) ;;
+    no-uv) notes="$notes；没装 uv，装不了 hcom";;
+    *) notes="$notes；hcom $HCOM_VERSION 没装好，稍后重跑";;
+  esac
   case "$(lmc antigravity)" in
     logged-out) notes="$notes；Antigravity 还没登录";;
     none) notes="$notes；没装 Antigravity";;
   esac
+  [ "$(lmc sandbox)" = ok ] || notes="$notes；Antigravity 放行 hcom 规则没写进去"
+  case "$(lmc gh)" in
+    logged-out) notes="$notes；GitHub 还没登录（在这台的 Computer 页签运行 gh auth login）";;
+    none) notes="$notes；没装 GitHub 命令行（gh）";;
+  esac
+  [ "$(lmc browser)" = ok ] || notes="$notes；浏览器命令行没装好，稍后重跑"
   printf '%s：准备好了%s\n' "$m" "$notes"
 }
 
@@ -251,7 +333,7 @@ dry_run_plan() {
   say "4. 网关没装就从 li2（不行再从 li）取安装包 $REMOTE_ZIP，核对大小和 SHA-256 后解到 $GW_DIR；插件放到 $PLUGIN_DIR，第一次装时挂进 web 配置。"
   say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉。"
   say "6. 装 ib 到 $BIN_DIR/ib。"
-  say "7. 在每台云电脑上：装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium；看 Antigravity 装没装、登没登录。"
+  say "7. 在每台云电脑上：固定装 hcom $HCOM_VERSION；在 Antigravity 设置里加 hcom 放行规则；看 Antigravity 和 GitHub（gh）登没登录；装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium。"
 }
 
 summary() {
