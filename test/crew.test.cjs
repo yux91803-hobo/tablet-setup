@@ -69,7 +69,7 @@ const args = process.argv.slice(2);
 const fakeDir = process.env.FAKE_DIR;
 const machine = process.env.FAKE_MACHINE || 'unknown';
 const stdin = fs.readFileSync(0, 'utf8');
-fs.appendFileSync(path.join(fakeDir, 'hcom.log'), JSON.stringify({ machine, args, stdin }) + '\\n');
+fs.appendFileSync(path.join(fakeDir, 'hcom.log'), JSON.stringify({ machine, args, stdin, cwd: process.cwd() }) + '\\n');
 const hcomDir = path.join(fakeDir, 'hcom');
 const readOr = (name, fallback) => {
   const mp = path.join(hcomDir, machine + '-' + name);
@@ -78,16 +78,42 @@ const readOr = (name, fallback) => {
   if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
   return fallback;
 };
+const nextFromSeq = (key, fallbackName, fallbackVal) => {
+  const seqRaw = readOr(key + '-seq.json', '');
+  if (seqRaw) {
+    const seq = JSON.parse(seqRaw);
+    const idxFile = path.join(fakeDir, machine + '-' + key + '.idx');
+    const idx = fs.existsSync(idxFile) ? Number(fs.readFileSync(idxFile, 'utf8')) : 0;
+    const item = seq[Math.min(idx, seq.length - 1)];
+    fs.writeFileSync(idxFile, String(idx + 1));
+    return typeof item === 'string' ? item : JSON.stringify(item);
+  }
+  return readOr(fallbackName, fallbackVal);
+};
 const sub = args[0];
 if (sub === 'list') {
-  process.stdout.write(readOr('list.json', '[]'));
+  process.stdout.write(nextFromSeq('list', 'list.json', '[]'));
   process.exit(0);
 }
 if (sub === 'term') {
   if (args[1] === 'inject') {
     process.exit(0);
   }
-  process.stdout.write(readOr('term.json', '{}'));
+  process.stdout.write(nextFromSeq('term', 'term.json', '{}'));
+  process.exit(0);
+}
+if (sub === 'agy') {
+  const resp = readOr('agy.json', JSON.stringify({ instances: ['keno'], names: ['crew-keno'] }));
+  const codeFile = path.join(hcomDir, machine + '-agy.code');
+  const code = fs.existsSync(codeFile) ? Number(fs.readFileSync(codeFile, 'utf8').trim()) : 0;
+  process.stdout.write(resp);
+  process.exit(code);
+}
+if (sub === 'kill') {
+  process.exit(0);
+}
+if (sub === 'send') {
+  process.stdout.write('Sent\\n');
   process.exit(0);
 }
 if (sub === 'events') {
@@ -302,7 +328,7 @@ test('screen 打印画面文字，去掉行尾空白', (t) => {
 });
 
 test('log 把事件整理成中文一行一条；--mark 记下最后的事件号', (t) => {
-  const events = readFixture('events.jsonl').replaceAll('bigboss', 'dsh');
+  const events = readFixture('events.jsonl');
   const { run, stateDir, hcomLog } = rig(t, {
     machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
     hcomFiles: {
@@ -313,9 +339,9 @@ test('log 把事件整理成中文一行一条；--mark 记下最后的事件号
   const r = run(['log', 'li2', '--last', '10', '--since', '47', '--mark']);
   assert.equal(r.status, 0, r.stderr);
   const lines = r.stdout.trim().split('\n');
-  assert.ok(lines.some(l => l.includes('19:38 收到 dsh：第六条测试')), r.stdout);
+  assert.ok(lines.some(l => l.includes('19:38 收到 DSH：第六条测试')), r.stdout);
   assert.ok(lines.some(l => l.includes('19:38 跑命令：hcom send')), r.stdout);
-  assert.ok(lines.some(l => l.includes('19:38 发给 dsh：串口波特率用 115200 还是 9600？')), r.stdout);
+  assert.ok(lines.some(l => l.includes('19:38 发给 DSH：串口波特率用 115200 还是 9600？')), r.stdout);
   assert.ok(lines.some(l => l === '19:38 空闲'), r.stdout);
   assert.equal(fs.readFileSync(path.join(stateDir, 'li2.last-id'), 'utf8').trim(), '53');
   const evCall = hcomLog().find(c => c.args[0] === 'events');
@@ -330,9 +356,197 @@ test('log 把事件整理成中文一行一条；--mark 记下最后的事件号
 
 test('机器名不是 li 或 li2 就以 2 退出', (t) => {
   const { run, ibLog } = rig(t);
-  for (const args of [['status', 'li3'], ['screen', 'prod'], ['log', 'foo'], ['screen'], ['log']]) {
+  for (const args of [['status', 'li3'], ['screen', 'prod'], ['log', 'foo'], ['screen'], ['log'], ['start', 'li3', '/tmp/x']]) {
     const r = run(args);
     assert.equal(r.status, 2, '参数 ' + args.join(' ') + ' 应退出 2，实际 ' + r.status);
   }
   assert.equal(ibLog().length, 0, '用法错误不该调 ib');
+});
+
+test('已有 crew agent 时 start 直接沿用', (t) => {
+  const { run, hcomLog, stateDir } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ directory: '/data/workspace/demo' }),
+    },
+  });
+  fs.writeFileSync(path.join(stateDir, 'li2.remote-url'), JSON.stringify({ name: 'crew-keno', url: 'https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2' }));
+  const r = run(['start', 'li2', '/data/workspace/demo']);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out, {
+    machine: 'li2',
+    name: 'crew-keno',
+    dir: '/data/workspace/demo',
+    remoteUrl: 'https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2',
+    reused: true,
+  });
+  assert.ok(!hcomLog().some(c => c.args[0] === 'agy'), '已有 agent 不应再拉第二个');
+});
+
+test('首次设置画面：退出码 3，关掉 agent，没按任何键', (t) => {
+  const { d, run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'suspended' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [JSON.parse(readFixture('term-onboarding.json'))],
+    },
+  });
+  const projDir = path.join(d, 'ws-onboard');
+  const r = run(['start', 'li2', projDir], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r.status, 3, r.stdout + r.stderr);
+  assert.match(r.stderr, /首次设置/);
+  const calls = hcomLog();
+  assert.ok(calls.some(c => c.args[0] === 'kill' && c.args[1] === 'crew-keno'), '应 kill 掉 agent');
+  assert.ok(!calls.some(c => c.args[0] === 'term' && c.args[1] === 'inject'), '不能按任何键');
+});
+
+test('服务条款画面：退出码 3，没按任何键', (t) => {
+  const { d, run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [JSON.parse(readFixture('term-terms.json'))],
+    },
+  });
+  const r = run(['start', 'li2', path.join(d, 'ws-terms')], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r.status, 3, r.stdout + r.stderr);
+  const calls = hcomLog();
+  assert.ok(calls.some(c => c.args[0] === 'kill'), '应 kill 掉 agent');
+  assert.ok(!calls.some(c => c.args[0] === 'term' && c.args[1] === 'inject'), '不能按任何键');
+});
+
+test('信任画面且没同意：退出码 4，没按键', (t) => {
+  const { d, run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [JSON.parse(readFixture('term-trust.json'))],
+    },
+  });
+  const r = run(['start', 'li2', path.join(d, 'ws-trust-no')], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r.status, 4, r.stdout + r.stderr);
+  const calls = hcomLog();
+  assert.ok(calls.some(c => c.args[0] === 'kill'), '应 kill 掉 agent');
+  assert.ok(!calls.some(c => c.args[0] === 'term' && c.args[1] === 'inject'), '没同意不能按任何键');
+});
+
+test('信任画面且同意过：只按一次回车，之后成功；光标不在允许行时以 9 退出且不按键', (t) => {
+  const { d, run, hcomLog, stateDir } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-term-seq.json': [
+        JSON.parse(readFixture('term-trust.json')),
+        JSON.parse(readFixture('term-remote.json')),
+      ],
+    },
+  });
+  const projDir = path.join(d, 'ws-trust-yes');
+  fs.writeFileSync(path.join(d, 'hcom/li2-list-seq.json'), JSON.stringify([
+    [],
+    makeCrewListFixture({ status: 'blocked' }),
+    makeCrewListFixture({ status: 'listening', directory: projDir }),
+  ]));
+  fs.writeFileSync(path.join(stateDir, 'trust-ok'), '1\n');
+  const r = run(['start', 'li2', projDir], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '3' } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.reused, false);
+  assert.equal(out.name, 'crew-keno');
+  const injects = hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(injects.length, 1, '只按一次回车');
+  assert.deepEqual(injects[0].args, ['term', 'inject', 'crew-keno', '--enter']);
+
+  // 光标不在 Yes, I trust this folder 行时，退出 9 且不按键
+  const badTrust = JSON.parse(readFixture('term-trust.json'));
+  badTrust.lines = badTrust.lines.map(l => l.replace('> Yes, I trust this folder', '  Yes, I trust this folder').replace('  No, exit', '> No, exit'));
+  const rig2 = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [badTrust],
+    },
+  });
+  fs.writeFileSync(path.join(rig2.stateDir, 'trust-ok'), '1\n');
+  const r2 = rig2.run(['start', 'li2', path.join(rig2.d, 'ws-bad-trust')], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r2.status, 9, r2.stdout + r2.stderr);
+  assert.ok(!rig2.hcomLog().some(c => c.args[0] === 'term' && c.args[1] === 'inject'), '光标不对时不能按键');
+});
+
+test('从画面里取出远程控制链接，并写进 status.json', (t) => {
+  const { d, run, stateDir } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-term-seq.json': [JSON.parse(readFixture('term-remote.json'))],
+    },
+  });
+  const projDir = path.join(d, 'ws-remote');
+  fs.writeFileSync(path.join(d, 'hcom/li2-list-seq.json'), JSON.stringify([
+    [],
+    makeCrewListFixture({ status: 'listening', directory: projDir }),
+  ]));
+  const r = run(['start', 'li2', projDir], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const out = JSON.parse(r.stdout);
+  const wantUrl = 'https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2';
+  assert.equal(out.remoteUrl, wantUrl);
+  assert.equal(out.dir, projDir);
+  const st = JSON.parse(fs.readFileSync(path.join(stateDir, 'status.json'), 'utf8'));
+  const li2 = st.machines.find(x => x.machine === 'li2');
+  assert.equal(li2.agent.remoteUrl, wantUrl);
+});
+
+test('认不出的画面：超时后退出码 9，并打出画面', (t) => {
+  const unknownTerm = {
+    cursor: [5, 0],
+    input_text: '',
+    lines: ['Unknown New Antigravity Modal v9', 'Please confirm something mysterious', ''],
+    prompt_empty: false,
+    ready: false,
+    size: [24, 80],
+  };
+  const { d, run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [unknownTerm],
+    },
+  });
+  const r = run(['start', 'li2', path.join(d, 'ws-unknown')], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '0.2' } });
+  assert.equal(r.status, 9, r.stdout + r.stderr);
+  assert.match(r.stderr, /Unknown New Antigravity Modal v9/);
+  assert.ok(!hcomLog().some(c => c.args[0] === 'term' && c.args[1] === 'inject'), '认不出的画面不能按键');
+});
+
+test('--model、--effort 原样传给 agy，团队身份说明 DSH 在 hcom 里叫 bigboss', (t) => {
+  const { d, run, hcomLog } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-term-seq.json': [JSON.parse(readFixture('term-remote.json'))],
+    },
+  });
+  const projDir = path.join(d, 'ws-opts');
+  fs.writeFileSync(path.join(d, 'hcom/li2-list-seq.json'), JSON.stringify([
+    [],
+    makeCrewListFixture({ status: 'listening', directory: projDir }),
+  ]));
+  const r = run(['start', 'li2', projDir, '--model', 'gemini-4-neon-high', '--effort', 'xhigh'], { env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '2' } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const calls = hcomLog();
+  const agyCall = calls.find(c => c.args[0] === 'agy');
+  assert.ok(agyCall, '应调用 hcom agy');
+  assert.equal(agyCall.cwd, projDir, '应在项目目录里执行');
+  assert.ok(agyCall.args.includes('--headless'));
+  assert.ok(agyCall.args.includes('--json'));
+  assert.ok(agyCall.args.includes('--tag') && agyCall.args[agyCall.args.indexOf('--tag') + 1] === 'crew');
+  assert.ok(agyCall.args.includes('--remote-control'));
+  assert.ok(agyCall.args.includes('--model') && agyCall.args[agyCall.args.indexOf('--model') + 1] === 'gemini-4-neon-high');
+  assert.ok(agyCall.args.includes('--effort') && agyCall.args[agyCall.args.indexOf('--effort') + 1] === 'xhigh');
+  const sysVal = agyCall.args[agyCall.args.indexOf('--hcom-system-prompt') + 1] || '';
+  assert.match(sysVal, /DSH/);
+  assert.match(sysVal, /bigboss/);
+  assert.match(sysVal, /@bigboss/);
+  const promptVal = agyCall.args[agyCall.args.indexOf('--hcom-prompt') + 1] || '';
+  assert.match(promptVal, /TEAM\.md/);
+  assert.match(promptVal, /@bigboss/);
 });
