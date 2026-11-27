@@ -81,7 +81,9 @@ function rig(t,{input=[KEYS.li2,KEYS.li]}={}){
   remoteHome(d,'li2');remoteHome(d,'li');
   const home=path.join(d,'tablet-home');fs.mkdirSync(home);
   const env={PATH:curlBin+':'+process.env.PATH,HOME:home,FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
-    LIMING_GW_DIR:path.join(d,'gw'),LIMING_PLUGIN_DIR:path.join(d,'plugin'),LIMING_IB_DIR:path.join(d,'keys'),LIMING_BIN_DIR:path.join(d,'usr-bin'),
+    LIMING_GW_DIR:path.join(d,'gw'),LIMING_PLUGIN_DIR:path.join(d,'plugin'),LIMING_CREW_PLUGIN_DIR:path.join(d,'crew-plugin'),
+    LIMING_IB_DIR:path.join(d,'keys'),LIMING_BIN_DIR:path.join(d,'usr-bin'),LIMING_CREW_STATE:path.join(d,'crew-state'),
+    LIMING_SKILL_DIR:path.join(d,'skills/liming-crew'),LIMING_OLD_SKILL_DIR:path.join(d,'skills/liming-cloud-computers'),
     LIMING_OLD_CLOUD_PLUGIN_DIR:path.join(d,'old-cloud-plugin'),LIMING_OLD_CLOUD_DIR:path.join(d,'old-cloud'),
     LIMING_INSTABOX:path.join(bin,'instabox'),LIMING_NPM:path.join(bin,'npm'),LIMING_DSH:path.join(bin,'dsh'),LIMING_APT:path.join(bin,'apt-get'),
     LIMING_TTY:path.join(d,'tty'),LIMING_ZIP_SIZE:z.size,LIMING_ZIP_SHA256:z.sha};
@@ -194,7 +196,9 @@ test('整套装一遍：两把 key 存好、网关经 InstaBox 从 li2 取、ib 
   // 网关：从 li2 拉安装包
   assert.ok(ibLog().some(l=>l.startsWith('li2 pull li2 '+REMOTE_ZIP+' ')));
   assert.ok(fs.existsSync(path.join(env.LIMING_GW_DIR,'current/wb_proxy.py')));
-  assert.equal(read('dsh.log'),'plugin --profile web add '+env.LIMING_PLUGIN_DIR+'\n');
+  const dshLines=read('dsh.log').trim().split('\n').filter(Boolean);
+  assert.ok(dshLines.includes('plugin --profile web add '+env.LIMING_PLUGIN_DIR));
+  assert.ok(dshLines.includes('plugin --profile web add '+env.LIMING_CREW_PLUGIN_DIR));
   // ib
   assert.equal(fs.readFileSync(path.join(env.LIMING_BIN_DIR,'ib'),'utf8'),fs.readFileSync(path.join(tablet,'ib.sh'),'utf8'));
   assert.equal(mode(path.join(env.LIMING_BIN_DIR,'ib')),0o755);
@@ -242,7 +246,7 @@ test('重复跑：直接回车保留原来的 key；不再下载安装包、不�
   for(const m of ['li2','li'])assert.equal(fs.readFileSync(path.join(env.LIMING_IB_DIR,m+'.key'),'utf8').trim(),KEYS[m]);
   assert.equal(ibLog().filter(l=>/ pull /.test(l)).length,pulls);
   assert.equal(fs.readFileSync(path.join(env.LIMING_GW_DIR,'accounts/acct.json'),'utf8'),'{"keep":true}');
-  assert.equal(read('dsh.log').split('\n').filter(Boolean).length,1,'网关插件只挂一次');
+  assert.equal(read('dsh.log').split('\n').filter(Boolean).length,2,'网关和团队两个插件各只挂一次');
 });
 
 test('li2 上没有安装包就从 li 取',t=>{
@@ -356,4 +360,54 @@ test('云端准备：没登录 GitHub 时汇总提示 gh auth login；不碰谷�
   assert.match(r.stdout,/li：准备好了；GitHub 还没登录（在这台的 Computer 页签运行 gh auth login）/);
   assert.equal(fs.readFileSync(tok,'utf8'),'fake-token\n','令牌内容不能变');
   assert.equal(fs.statSync(tok).mtimeMs,oldMtime.getTime(),'令牌修改时间不能变');
+});
+
+test('装机下载并装好 crew、技能「团队」、TEAM 模板和插件 liming-crew，插件只挂一次，旧技能目录被删掉',t=>{
+  const {d,env,run,read}=rig(t);
+  fs.mkdirSync(env.LIMING_OLD_SKILL_DIR,{recursive:true});
+  fs.writeFileSync(path.join(env.LIMING_OLD_SKILL_DIR,'SKILL.md'),'old skill\n');
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.equal(fs.readFileSync(path.join(env.LIMING_BIN_DIR,'crew'),'utf8'),fs.readFileSync(path.join(tablet,'crew.sh'),'utf8'));
+  assert.equal(mode(path.join(env.LIMING_BIN_DIR,'crew')),0o755);
+  assert.equal(fs.readFileSync(path.join(env.LIMING_SKILL_DIR,'SKILL.md'),'utf8'),fs.readFileSync(path.join(tablet,'skills/liming-crew/SKILL.md'),'utf8'));
+  assert.equal(fs.readFileSync(path.join(env.LIMING_SKILL_DIR,'TEAM.template.md'),'utf8'),fs.readFileSync(path.join(tablet,'skills/liming-crew/TEAM.template.md'),'utf8'));
+  assert.ok(!fs.existsSync(env.LIMING_OLD_SKILL_DIR),'旧技能目录应被删掉');
+  for(const f of ['package.json','cordis.patch.yml','lib/index.js','lib/views.js','lib/crew-client.js']){
+    assert.equal(fs.readFileSync(path.join(env.LIMING_CREW_PLUGIN_DIR,f),'utf8'),fs.readFileSync(path.join(tablet,'liming-crew',f),'utf8'),'插件文件 '+f);
+  }
+  assert.ok(fs.existsSync(path.join(env.LIMING_CREW_PLUGIN_DIR,'.added')));
+  assert.match(r.stdout,/团队/);
+  assert.match(r.stdout,/gh auth login/);
+  assert.match(r.stdout,/agy/);
+  // 再跑一次：liming-crew 插件不重复挂
+  fs.writeFileSync(path.join(d,'tty'),'\n\n\n');
+  assert.equal(run().status,0);
+  const crewAdds=read('dsh.log').split('\n').filter(l=>l==='plugin --profile web add '+env.LIMING_CREW_PLUGIN_DIR);
+  assert.equal(crewAdds.length,1,'liming-crew 插件只挂一次');
+});
+
+test('信任同意：回答 y 写标记，直接回车保持不变，回答 n 删标记',t=>{
+  const {d,env,run}=rig(t,{input:[KEYS.li2,KEYS.li,'y']});
+  const trustFile=path.join(env.LIMING_CREW_STATE,'trust-ok');
+  assert.equal(run().status,0);
+  assert.ok(fs.existsSync(trustFile),'回答 y 应写出 trust-ok');
+  // 已有 trust-ok 时直接回车：保持不变
+  fs.writeFileSync(path.join(d,'tty'),'\n\n\n');
+  assert.equal(run().status,0);
+  assert.ok(fs.existsSync(trustFile),'已有 trust-ok 时直接回车应保持不变');
+  // 回答 n：删掉 trust-ok
+  fs.writeFileSync(path.join(d,'tty'),'\n\nn\n');
+  assert.equal(run().status,0);
+  assert.ok(!fs.existsSync(trustFile),'回答 n 应删掉 trust-ok');
+});
+
+test('取不到网关安装包时给出新提示，并继续装其余部分',t=>{
+  const {d,env,run}=rig(t);
+  fs.writeFileSync(path.join(d,'no-zip-li2'),'');
+  fs.writeFileSync(path.join(d,'no-zip-li'),'');
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout+r.stderr,/网关安装包找不到：以前从 li2 上取，两台重建后已经没有了。平板上网关没装的话先别装这部分，联系 AI 想办法/);
+  assert.ok(fs.existsSync(path.join(env.LIMING_BIN_DIR,'crew')),'其余部分（crew）照常装好');
+  assert.ok(fs.existsSync(path.join(env.LIMING_SKILL_DIR,'SKILL.md')),'其余部分（技能）照常装好');
+  assert.ok(fs.existsSync(path.join(env.LIMING_CREW_PLUGIN_DIR,'package.json')),'其余部分（插件）照常装好');
 });

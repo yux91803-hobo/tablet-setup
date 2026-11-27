@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Liming 平板装机：在 DSH Go 的终端里（打开一个对话 → 全部功能 → 终端）运行
 #   apt-get update && apt-get install -y curl && curl -fsSL https://tablet.liming-work.com/setup.sh | bash
-# 装好随本机引擎启停的 WorkBuddy 网关和插件；再让平板上的 AI 能操作两台云电脑 li、li2：
+# 装好随本机引擎启停的 WorkBuddy 网关和插件，以及 crew 命令、技能「团队」和插件 liming-crew；
 # 装 InstaBox 命令行和 ib（按机器选账号的 key），存两把 key（li2、li 所在账号各一把，只要 machines:read 和 machines:write），
-# 在 li2、li 上装好浏览器命令行、检查 Antigravity 登录状态。
+# 在 li2、li 上固定装好 hcom 0.7.31、给 Antigravity 放行 hcom 沙箱目录、检查 Antigravity 和 GitHub 登录、装好浏览器命令行。
 # 脚本里不含任何密钥；key 只存平板 ~/.config/liming/instabox/（权限 600），只经环境变量交给 instabox。可以重复运行。
 #   --dry-run  只列出要做的事    --skip-li  不接 li
 # 说明：https://github.com/yux91803-hobo/tablet-setup 的 README；设计见 docs/superpowers/specs/2026-11-27-crew-design.md
@@ -12,10 +12,15 @@ set -euo pipefail
 
 BASE=${LIMING_BASE:-https://tablet.liming-work.com}
 HOME_DIR=${HOME:-/root}
+DSH_BASE=${DSH_HOME:-$HOME_DIR/.dsh}
 GW_DIR=${LIMING_GW_DIR:-/root/workbuddy-gateway}
 PLUGIN_DIR=${LIMING_PLUGIN_DIR:-/root/liming-gateway}
+CREW_PLUGIN_DIR=${LIMING_CREW_PLUGIN_DIR:-$DSH_BASE/dsh-go/plugins/liming-crew}
 KEY_DIR=${LIMING_IB_DIR:-$HOME_DIR/.config/liming/instabox}
+CREW_STATE_DIR=${LIMING_CREW_STATE:-$HOME_DIR/.config/liming/crew}
 BIN_DIR=${LIMING_BIN_DIR:-/usr/local/bin}
+SKILL_DIR=${LIMING_SKILL_DIR:-$DSH_BASE/skills/liming-crew}
+OLD_SKILL_DIR=${LIMING_OLD_SKILL_DIR:-$DSH_BASE/skills/liming-cloud-computers}
 OLD_CLOUD_PLUGIN_DIR=${LIMING_OLD_CLOUD_PLUGIN_DIR:-/root/liming-cloud}
 OLD_CLOUD_DIR=${LIMING_OLD_CLOUD_DIR:-$HOME_DIR/.liming-cloud}
 INSTABOX=${LIMING_INSTABOX:-instabox}
@@ -33,8 +38,10 @@ ZIP_SHA256=${LIMING_ZIP_SHA256:-b322c73b9a18f09c6560bff0e4b748e9acdc26272c339b4f
 REMOTE_ZIP=/data/workbuddy-gateway/releases/workbuddy2api-hub-$VERSION.zip
 WORK=''
 GATEWAY_FILES='package.json cordis.patch.yml lib/index.js lib/gateway.js'
+CREW_FILES='package.json cordis.patch.yml lib/index.js lib/views.js lib/crew-client.js'
 HAVE=''          # 有能用的 key 的机器
 OLD_REMOVED=0    # 清掉过以前的云端任务插件
+GW_MISSING=0     # 两台都取不到网关安装包时标记为 1，其余步骤照做
 
 say() { printf '%s\n' "$*"; }
 say_err() { printf '%s\n' "$*" >&2; }
@@ -149,7 +156,33 @@ install_gateway() {
   for d in accounts usage logs; do mkdir -p "$GW_DIR/$d"; chmod 700 "$GW_DIR/$d"; done
 }
 
+# 问一次是否允许 crew 在云电脑上自动信任它新建的项目目录（从 fd 3 读；已有标记时直接回车保持不变）。
+setup_trust() {
+  local have=0 ans=''
+  [ -f "$CREW_STATE_DIR/trust-ok" ] && have=1
+  if [ "$have" = 1 ]; then
+    printf '%s' "允许 crew 在云电脑上自动信任它新建的项目目录吗？（y/N，直接回车保持已同意）：" >&2
+  else
+    printf '%s' "允许 crew 在云电脑上自动信任它新建的项目目录吗？（y/N）：" >&2
+  fi
+  IFS= read -r ans <&3 || true
+  ans=$(trim "$ans")
+  case "$ans" in
+    y|Y|yes|YES)
+      mkdir -p "$CREW_STATE_DIR"; chmod 700 "$CREW_STATE_DIR"
+      printf '1\n' > "$CREW_STATE_DIR/trust-ok.tmp"
+      mv -f "$CREW_STATE_DIR/trust-ok.tmp" "$CREW_STATE_DIR/trust-ok"
+      ;;
+    n|N|no|NO)
+      rm -f "$CREW_STATE_DIR/trust-ok"
+      ;;
+    *)
+      ;;
+  esac
+}
+
 # 网关没装就经 InstaBox 从 li2 取安装包（取不到再从 li 取），核对后装上。
+# 两台重建后若都取不到，给出清楚提示并继续装其余部分，不中断整个装机。
 ensure_gateway() {
   local m
   if [ -f "$GW_DIR/current/wb_proxy.py" ]; then say "网关已经装好（$GW_DIR/current），不再下载。"; return 0; fi
@@ -163,8 +196,9 @@ ensure_gateway() {
     fi
     say "$m 上取不到。"
   done
-  say_err "两台上都取不到网关安装包（$REMOTE_ZIP）"
-  return 1
+  GW_MISSING=1
+  say_err "网关安装包找不到：以前从 li2 上取，两台重建后已经没有了。平板上网关没装的话先别装这部分，联系 AI 想办法"
+  return 0
 }
 
 # 插件文件每次都更新（本地路径安装是链接目录，重启引擎就用上新的）；只在第一次挂进 web 配置。
@@ -188,6 +222,11 @@ cleanup_old_tablet() {
 install_tools() {
   mkdir -p "$BIN_DIR"
   cp -f "$WORK/ib.sh" "$BIN_DIR/ib.tmp"; chmod 755 "$BIN_DIR/ib.tmp"; mv -f "$BIN_DIR/ib.tmp" "$BIN_DIR/ib"
+  cp -f "$WORK/crew.sh" "$BIN_DIR/crew.tmp"; chmod 755 "$BIN_DIR/crew.tmp"; mv -f "$BIN_DIR/crew.tmp" "$BIN_DIR/crew"
+  mkdir -p "$SKILL_DIR"
+  cp -f "$WORK/SKILL.md" "$SKILL_DIR/SKILL.md.tmp"; mv -f "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
+  cp -f "$WORK/TEAM.template.md" "$SKILL_DIR/TEAM.template.md.tmp"; mv -f "$SKILL_DIR/TEAM.template.md.tmp" "$SKILL_DIR/TEAM.template.md"
+  rm -rf "$OLD_SKILL_DIR"
 }
 
 # 在云电脑上跑的准备脚本（经 instabox exec --stdin 送过去）。每一项各自报一行「LMC 项 结果」，一项失败不影响别的项。
@@ -328,34 +367,42 @@ ensure_packages() {
 dry_run_plan() {
   say "--dry-run：只列出要做的事，什么都没改。"
   say "1. 检查 dsh；缺 python3、curl 才装；没有 InstaBox 命令行就 npm i -g instabox@$INSTABOX_VERSION。"
-  say "2. 从 $BASE 下载网关插件和 ib。"
-  say "3. 问 li2$([ "$1" = 1 ] || echo '、li') 所在账号的 InstaBox key（只要 machines:read 和 machines:write），用 instabox get 核对后存到 $KEY_DIR（权限 600）。"
-  say "4. 网关没装就从 li2（不行再从 li）取安装包 $REMOTE_ZIP，核对大小和 SHA-256 后解到 $GW_DIR；插件放到 $PLUGIN_DIR，第一次装时挂进 web 配置。"
-  say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉。"
-  say "6. 装 ib 到 $BIN_DIR/ib。"
-  say "7. 在每台云电脑上：固定装 hcom $HCOM_VERSION；在 Antigravity 设置里加 hcom 放行规则；看 Antigravity 和 GitHub（gh）登没登录；装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium。"
+  say "2. 从 $BASE 下载网关插件、团队插件（liming-crew）、ib、crew、技能「团队」和 TEAM.template.md。"
+  say "3. 问 li2$([ "$1" = 1 ] || echo '、li') 所在账号的 InstaBox key（只要 machines:read 和 machines:write），用 instabox get 核对后存到 $KEY_DIR（权限 600）；再问一次是否允许 crew 自动信任新目录。"
+  say "4. 网关没装就尝试从云电脑取安装包（取不到则跳过网关、继续装其余部分）；插件分别装到 $PLUGIN_DIR 和 $CREW_PLUGIN_DIR，第一次装时挂进 web 配置。"
+  say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉；删掉旧技能目录 $OLD_SKILL_DIR。"
+  say "6. 装 ib 到 $BIN_DIR/ib，crew 到 $BIN_DIR/crew，技能「团队」和 TEAM.template.md 到 $SKILL_DIR。"
+  say "7. 在每台云电脑上：固定装 hcom $HCOM_VERSION；在 Antigravity 设置里加 hcom 沙箱目录放行规则；看 Antigravity 和 GitHub（gh）登没登录；装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium。"
 }
 
 summary() {
-  local line
+  local line trust_msg='未开启'
+  [ -f "$CREW_STATE_DIR/trust-ok" ] && trust_msg='已同意'
   say ""
   say "装好了。"
-  say "· 网关：$GW_DIR/current（$VERSION），日志在 $GW_DIR/logs/；插件 $PLUGIN_DIR"
-  say "· ib：$BIN_DIR/ib"
+  if [ "$GW_MISSING" = 1 ]; then
+    say "· 网关：未装（两台上都找不到安装包，其余部分已装好）"
+  else
+    say "· 网关：$GW_DIR/current（$VERSION），日志在 $GW_DIR/logs/；插件 $PLUGIN_DIR"
+  fi
+  say "· 命令：$BIN_DIR/ib、$BIN_DIR/crew"
+  say "· 技能「团队」：$SKILL_DIR（含 TEAM.template.md）；自动信任目录：$trust_msg"
+  say "· 插件「团队」：$CREW_PLUGIN_DIR"
   [ "$OLD_REMOVED" = 1 ] && say "· 旧的云端任务插件已删掉（平板上的旧令牌、旧 key 一起删了；InstaBox 后台那几把旧 key 可以吊销）"
   while IFS= read -r line; do [ -n "$line" ] && say "· $line"; done <<<"$1"
   cat <<'EOF'
 
-以后直接在聊天里让 AI 用云电脑，比如「看看 li2 上 /data/workspace 里有什么」「在 li 上编译这个工程」
-「在 li2 上打开某个网页帮我查」。
-想看云上的浏览器：在 InstaBox 网页打开那台机器的 Computer 页签。
+以后直接在聊天里让 DSH 带队，比如：「在 li2 上开个项目，做……」
+看云上 Antigravity 的现场：
+· 面板：App 全部功能里的「团队」（或聊天页输入框上方「插件」弹层），能看最近动作、终端画面、插话、叫停、允许/拒绝；
+· 状态条：输入框上方一行，只读本地缓存，不会叫醒云电脑。
 
-第一次装时还要在 App 里：
-1. 设置 › 本机引擎 › 重启。网关会跟着引擎起来。
-2. 浏览器打开 http://127.0.0.1:8788 ，用 admin 登录，先在设置里改密码，再加网关账号，然后在「设置 → API Key」新建一把 key。
-3. 设置 › 模型 › 添加渠道：兼容协议 Responses，Base URL http://127.0.0.1:8788/v1，API Key 填上一步的 key；获取模型，勾 deepseek-v4.1-flash、glm-5.4、kimi-k3.1-pro。
+第一次还要做这几步：
+1. 云电脑（li、li2 各做一次）：打开 InstaBox 网页那台机器的 Computer 页签，开终端运行一次 agy 做首次设置后退出；再运行一次 gh auth login 登录 GitHub。
+2. App 里：设置 › 本机引擎 › 重启（新装的网关和「团队」插件会跟着引擎起来）。
+3. 如果网关是第一次装：浏览器打开 http://127.0.0.1:8788 用 admin 改密码、加账号、建 API Key，再到 设置 › 模型 › 添加渠道（Responses，http://127.0.0.1:8788/v1）。
 4. 设置 › 手机操控：打开开关，开无障碍和通知。
-5. 新开一个对话，新装的配置才会生效。
+5. 新开一个对话，技能「团队」才会生效。
 
 别做：别点「重置运行环境」（会删掉网关、账号和这里存的 key；真重置了就再跑一次这个脚本）。
 EOF
@@ -380,17 +427,27 @@ main() {
   WORK=$(mktemp -d)
   trap 'rm -rf "$WORK"' EXIT
   say "下载插件和配置……"
-  mkdir -p "$WORK/plugin/lib"
-  fetch_file "$BASE/liming-gateway/package.json" "$WORK/plugin/package.json" '"name": "liming-gateway"' || die "插件没下载下来"
-  fetch_file "$BASE/liming-gateway/cordis.patch.yml" "$WORK/plugin/cordis.patch.yml" 'liming-gateway' || die "插件没下载下来"
-  fetch_file "$BASE/liming-gateway/lib/index.js" "$WORK/plugin/lib/index.js" 'liming-gateway' || die "插件没下载下来"
-  fetch_file "$BASE/liming-gateway/lib/gateway.js" "$WORK/plugin/lib/gateway.js" 'createSupervisor' || die "插件没下载下来"
+  mkdir -p "$WORK/plugin/lib" "$WORK/crew-plugin/lib"
+  fetch_file "$BASE/liming-gateway/package.json" "$WORK/plugin/package.json" '"name": "liming-gateway"' || die "网关插件没下载下来"
+  fetch_file "$BASE/liming-gateway/cordis.patch.yml" "$WORK/plugin/cordis.patch.yml" 'liming-gateway' || die "网关插件没下载下来"
+  fetch_file "$BASE/liming-gateway/lib/index.js" "$WORK/plugin/lib/index.js" 'liming-gateway' || die "网关插件没下载下来"
+  fetch_file "$BASE/liming-gateway/lib/gateway.js" "$WORK/plugin/lib/gateway.js" 'createSupervisor' || die "网关插件没下载下来"
+  fetch_file "$BASE/liming-crew/package.json" "$WORK/crew-plugin/package.json" '"name": "liming-crew"' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/cordis.patch.yml" "$WORK/crew-plugin/cordis.patch.yml" 'liming-crew' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/index.js" "$WORK/crew-plugin/lib/index.js" 'liming-crew' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/views.js" "$WORK/crew-plugin/lib/views.js" 'stripText' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/crew-client.js" "$WORK/crew-plugin/lib/crew-client.js" 'runCrew' || die "团队插件没下载下来"
   fetch_file "$BASE/ib.sh" "$WORK/ib.sh" 'LIMING_IB_DIR' || die "ib 没下载下来"
+  fetch_file "$BASE/crew.sh" "$WORK/crew.sh" 'LIMING_CREW_STATE' || die "crew 没下载下来"
+  fetch_file "$BASE/skills/liming-crew/SKILL.md" "$WORK/SKILL.md" 'name: liming-crew' || die "技能没下载下来"
+  fetch_file "$BASE/skills/liming-crew/TEAM.template.md" "$WORK/TEAM.template.md" '# TEAM' || die "TEAM 模板没下载下来"
 
   if [ "$skip_li" = 1 ]; then setup_keys li2; else setup_keys li2 li; fi
   [ -n "$HAVE" ] || die "至少要一把 InstaBox key：在 InstaBox 后台 API keys 新建，只勾 machines:read 和 machines:write（别勾删除），再运行这个脚本"
+  setup_trust
   ensure_gateway || die "网关没装上"
-  install_plugin "$WORK/plugin" "$PLUGIN_DIR" "$GATEWAY_FILES" || die "插件没装上"
+  install_plugin "$WORK/plugin" "$PLUGIN_DIR" "$GATEWAY_FILES" || die "网关插件没装上"
+  install_plugin "$WORK/crew-plugin" "$CREW_PLUGIN_DIR" "$CREW_FILES" || die "团队插件没装上"
   cleanup_old_tablet
   install_tools
   for m in li2 li; do
