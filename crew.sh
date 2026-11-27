@@ -359,11 +359,30 @@ cmd_screen() {
     exit 9
   fi
   if [ "$want_json" = 1 ]; then
-    printf '%s\n' "$raw"
+    printf '%s' "$raw" | python3 -c '
+import json, re, sys
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+def redact(obj):
+    if isinstance(obj, str):
+        return EMAIL_RE.sub("（邮箱已隐藏）", obj)
+    if isinstance(obj, list):
+        return [redact(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: redact(v) for k, v in obj.items()}
+    return obj
+s = sys.stdin.read()
+try:
+    d = json.loads(s)
+except Exception:
+    print(EMAIL_RE.sub("（邮箱已隐藏）", s))
+    sys.exit(0)
+print(json.dumps(redact(d), ensure_ascii=False))
+'
     return 0
   fi
   printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -374,7 +393,7 @@ if not isinstance(lines, list):
     sys.stderr.write("终端画面缺少 lines 字段\n")
     sys.exit(9)
 for line in lines:
-    print(str(line).rstrip(" \t\r"))
+    print(EMAIL_RE.sub("（邮箱已隐藏）", str(line)).rstrip(" \t\r"))
 '
 }
 
@@ -617,6 +636,7 @@ print(json.dumps({
   launch_out=$(remote "$m" "$launch_cmd" 120 2>&1) || launch_rc=$?
   # hcom agy 退出码 0=就绪，2=仍在启动或卡在需要确认的画面；只有其它非零才是拉起失败
   if [ "$launch_rc" -ne 0 ] && [ "$launch_rc" -ne 2 ]; then
+    launch_out=$(printf '%s' "$launch_out" | python3 -c 'import re,sys; print(re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "（邮箱已隐藏）", sys.stdin.read()), end="")')
     say_err "在 $m 上拉起 Antigravity 失败（退出码 $launch_rc）：$launch_out"
     exit 9
   fi
@@ -675,7 +695,8 @@ lines = d.get("lines") if isinstance(d, dict) else None
 if not isinstance(lines, list):
     print(json.dumps({"kind": "invalid", "url": "", "ready": "unknown", "text": ""}))
     sys.exit(0)
-clean = [str(l).rstrip(" \t\r") for l in lines]
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+clean = [EMAIL_RE.sub("（邮箱已隐藏）", str(l)).rstrip(" \t\r") for l in lines]
 text = "\n".join(clean)
 m_url = re.search(r"https://antigravity\.google\.com/r/[^\s]+", text)
 url = m_url.group(0) if m_url else ""

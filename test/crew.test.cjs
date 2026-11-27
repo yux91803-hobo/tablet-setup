@@ -419,6 +419,57 @@ test('screen 打印画面文字，去掉行尾空白', (t) => {
   assert.deepEqual(JSON.parse(j.stdout), term);
 });
 
+test('screen 普通输出和 --json 都把邮箱换成「（邮箱已隐藏）」，start 出错打印画面也隐藏邮箱', (t) => {
+  const term = JSON.parse(readFixture('term-remote.json'));
+  term.lines[1] = '     ▀▀▀▀▀▀       someone@example.com (Google AI Pro)';
+  term.input_text = '发给 other.user+tag@sub.example.org 的话';
+  term.extra = { nested: 'contact a_b@test.co' };
+  const { d, run } = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-term.json': term,
+    },
+  });
+  const txt = run(['screen', 'li2']);
+  assert.equal(txt.status, 0, txt.stderr);
+  assert.ok(!txt.stdout.includes('someone@example.com'), '普通输出不能露出邮箱');
+  assert.ok(txt.stdout.includes('（邮箱已隐藏） (Google AI Pro)'), txt.stdout);
+
+  const j = run(['screen', 'li2', '--json']);
+  assert.equal(j.status, 0, j.stderr);
+  assert.ok(!j.stdout.includes('someone@example.com'), '--json lines 不能露出邮箱');
+  assert.ok(!j.stdout.includes('other.user+tag@sub.example.org'), '--json input_text 不能露出邮箱');
+  assert.ok(!j.stdout.includes('a_b@test.co'), '--json 嵌套字段不能露出邮箱');
+  const parsed = JSON.parse(j.stdout);
+  assert.ok(parsed.lines[1].includes('（邮箱已隐藏）'));
+  assert.equal(parsed.input_text, '发给 （邮箱已隐藏） 的话');
+  assert.equal(parsed.extra.nested, 'contact （邮箱已隐藏）');
+
+  // crew start 出错打印画面片段时同样隐藏邮箱
+  const badTerm = {
+    cursor: [5, 0],
+    input_text: '',
+    lines: ['Antigravity CLI', 'Logged in as someone@example.com', 'Unknown Modal'],
+    prompt_empty: false,
+    ready: false,
+    size: [24, 80],
+  };
+  const rig2 = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list-seq.json': [[], makeCrewListFixture({ status: 'blocked' })],
+      'li2-term-seq.json': [badTerm],
+    },
+  });
+  const rs = rig2.run(['start', 'li2', path.join(d, 'ws-email-err')], {
+    env: { LIMING_CREW_POLL_INTERVAL: '0.05', LIMING_CREW_START_TIMEOUT: '0.2' },
+  });
+  assert.equal(rs.status, 9, rs.stdout + rs.stderr);
+  assert.ok(!rs.stderr.includes('someone@example.com'), 'start 出错画面不能露出邮箱');
+  assert.ok(rs.stderr.includes('Logged in as （邮箱已隐藏）'), rs.stderr);
+});
+
 test('log 把事件整理成中文一行一条；--mark 记下最后的事件号', (t) => {
   const events = readFixture('events.jsonl');
   const { run, stateDir, hcomLog } = rig(t, {
