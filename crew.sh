@@ -77,9 +77,11 @@ if isinstance(cd, str) and cd.strip():
 raw_state = str(d.get("state") or "").lower()
 if raw_state == "running":
     st = "running"
+elif raw_state == "starting":
+    st = "starting"
 elif raw_state == "stopped":
     st = "stopped"
-elif raw_state in ("suspended", "paused", "starting"):
+elif raw_state in ("suspended", "paused"):
     st = "paused"
 else:
     st = "unknown"
@@ -306,6 +308,8 @@ for row in d.get("machines") or []:
     if st == "cooldown":
         cd = row.get("cooldownUntil")
         print(f"{m}：冷却到 {bj_hm(cd)}")
+    elif st == "starting":
+        print(f"{m}：正在叫醒")
     elif st == "paused":
         print(f"{m}：睡着")
     elif st == "stopped":

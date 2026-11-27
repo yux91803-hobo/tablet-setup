@@ -69,6 +69,7 @@ function ctxLabel(ctx) {
 function shortMachineState(row) {
   if (!row || typeof row !== 'object') return '未知';
   if (row.state === 'cooldown') return '冷却中';
+  if (row.state === 'starting') return '正在叫醒';
   if (row.state === 'paused') return '睡着';
   if (row.state === 'stopped') return '关机';
   if (row.state !== 'running') return '未知';
@@ -122,6 +123,9 @@ function memberRow(row) {
       icon: 'clock',
       tone: 'warn',
     };
+  }
+  if (st === 'starting') {
+    return { title: `${m} · 正在叫醒`, subtitle: '云电脑正在启动', trailing: '启动中', icon: 'running', tone: 'info' };
   }
   if (st === 'paused') {
     return { title: `${m} · 睡着`, subtitle: '发消息时会自动叫醒', trailing: '休眠', icon: 'pause', tone: 'muted' };

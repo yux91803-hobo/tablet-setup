@@ -55,6 +55,7 @@ test('stripText 各种状态都不超过 24 字', async () => {
     { machines: [{ machine: 'li', state: 'running', agent: { status: 'active' } }, { machine: 'li2', state: 'running', agent: { status: 'listening' } }] },
     { machines: [{ machine: 'li', state: 'running', agent: { status: 'blocked' } }, { machine: 'li2', state: 'cooldown', cooldownUntil: '2026-11-27T14:00:00Z', agent: null }] },
     { machines: [{ machine: 'li', state: 'stopped', agent: null }, { machine: 'li2', state: 'unknown', agent: null }] },
+    { machines: [{ machine: 'li', state: 'starting', agent: null }, { machine: 'li2', state: 'starting', agent: null }] },
     { machines: [{ machine: 'li', state: 'running', agent: { status: 'listening' } }, { machine: 'li2', state: 'running', agent: { status: 'listening' } }] },
   ];
   for (const st of cases) {
@@ -65,7 +66,26 @@ test('stripText 各种状态都不超过 24 字', async () => {
   }
   assert.equal(stripText(null), '团队：未知');
   assert.equal(stripText({ machines: [{ machine: 'li', state: 'paused', agent: null }, { machine: 'li2', state: 'paused', agent: null }] }), 'li、li2 都在睡');
+  assert.equal(stripText({ machines: [{ machine: 'li', state: 'starting', agent: null }, { machine: 'li2', state: 'paused', agent: null }] }), 'li 正在叫醒 · li2 睡着');
   assert.equal(stripText({ machines: [{ machine: 'li', state: 'running', agent: { status: 'active' } }, { machine: 'li2', state: 'running', agent: { status: 'listening' } }] }), 'li 干活中 · li2 空闲');
+});
+
+test('panelData 把 starting 状态显示为「正在叫醒」', async () => {
+  const { panelData } = await loadViews();
+  const data = panelData({
+    status: {
+      at: '2026-11-27T11:40:00Z',
+      machines: [
+        { machine: 'li', state: 'starting', cooldownUntil: null, agent: null },
+        { machine: 'li2', state: 'paused', cooldownUntil: null, agent: null },
+      ],
+    },
+    selected: 'li',
+    screen: null,
+    log: [],
+  });
+  assert.equal(data.members[0].title, 'li · 正在叫醒');
+  assert.match(data.selectedSummary, /正在叫醒/);
 });
 
 test('panelData 把 term-idle.json、events.jsonl 整理成面板数据，不超过 30 KiB（含压力测试）', async () => {

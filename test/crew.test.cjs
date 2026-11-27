@@ -313,13 +313,13 @@ test('冷却到将来的时间记为 cooldown，过去的时间不算冷却', (t
   const byM = Object.fromEntries(JSON.parse(r.stdout).machines.map(m => [m.machine, m]));
   assert.equal(byM.li.state, 'cooldown');
   assert.equal(byM.li.cooldownUntil, future);
-  assert.equal(byM.li2.state, 'paused', '过去的冷却时间不算冷却，starting 不 exec');
+  assert.equal(byM.li2.state, 'starting', '过去的冷却时间不算冷却，starting 记为 starting 且不 exec');
   assert.equal(byM.li2.cooldownUntil, null);
   assert.ok(!ibLog().some(l => l.startsWith('exec ')));
   const txt = run(['status']);
   assert.equal(txt.status, 0, txt.stderr);
   assert.match(txt.stdout, /li：冷却到 \d{2}:\d{2}/);
-  assert.match(txt.stdout, /li2：睡着/);
+  assert.match(txt.stdout, /li2：正在叫醒/);
 });
 
 test('ib get 失败记为 unknown，退出码仍是 0，另一台照常', (t) => {
