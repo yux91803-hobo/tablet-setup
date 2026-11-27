@@ -32,7 +32,7 @@ case "$1" in
   pull) [ "$acct" = "$2" ] || exit 1; [ -f "$FAKE_DIR/no-zip-$2" ] && { echo "pull: no such file" >&2; exit 1; }; cp "$FAKE_ZIP" "$4";;
   exec) m=$2; [ "$acct" = "$m" ] || exit 1
     [ -f "$FAKE_DIR/cooling-$m" ] && { echo "error: $m is cooling down" >&2; exit 1; }
-    HOME="$FAKE_DIR/home-$m" PATH="$FAKE_DIR/home-$m/bin:$FAKE_DIR/base-bin" LIMING_REMOTE_WS="$FAKE_DIR/ws-$m" bash -s;;
+    HOME="$FAKE_DIR/home-$m" PATH="$FAKE_DIR/home-$m/bin:$FAKE_DIR/base-bin" LIMING_REMOTE_WS="$FAKE_DIR/ws-$m" LIMING_SYSTEMD_DIR="$FAKE_DIR/home-$m/etc-systemd" bash -s;;
   *) echo "unexpected: $*" >&2; exit 2;;
 esac
 `;
@@ -42,8 +42,8 @@ function makeZip(file){
   assert.equal(r.status,0,String(r.stderr));
   const buf=fs.readFileSync(file);return {size:String(buf.length),sha:crypto.createHash('sha256').update(buf).digest('hex')};
 }
-// 一台「云电脑」的 HOME：有 npm（装 playwright-cli 时放一个假的进 bin）、可选 Antigravity、uv、hcom、gh
-function remoteHome(dir,m,{agy='logged-in',hcom='0.7.31',uv=true,gh='logged-in',settings=null}={}){
+// 一台「云电脑」的 HOME：有 npm（装 playwright-cli 时放一个假的进 bin）、可选 Antigravity、uv、hcom、gh、sudo/systemctl/unshare/mountpoint
+function remoteHome(dir,m,{agy='logged-in',hcom='0.7.31',uv=true,gh='logged-in',settings=null,sudo=true,unshareOk=true,alreadyMounted=false}={}){
   const h=path.join(dir,'home-'+m),bin=path.join(h,'bin'),lbin=path.join(h,'.local/bin');
   for(const p of ['.local/bin','bin'])fs.mkdirSync(path.join(h,p),{recursive:true});
   // Antigravity 命令行装在 ~/.local/bin/agy；登录后 ~/.gemini/antigravity-cli 里有令牌文件
@@ -63,6 +63,23 @@ function remoteHome(dir,m,{agy='logged-in',hcom='0.7.31',uv=true,gh='logged-in',
     const rc=gh==='logged-in'?0:1;
     fs.writeFileSync(path.join(bin,'gh'),`#!/bin/sh\necho "gh $*" >> "$HOME/remote.log"\nexit ${rc}\n`,{mode:0o755});
   }
+  if(alreadyMounted)fs.writeFileSync(path.join(h,'.agy-proc-mounted'),'1\n');
+  if(!unshareOk)fs.writeFileSync(path.join(h,'.unshare-fail'),'1\n');
+  if(sudo){
+    fs.writeFileSync(path.join(bin,'sudo'),'#!/bin/sh\necho "sudo $*" >> "$HOME/sudo.log"\nif [ "${1:-}" = "-n" ]; then shift; fi\nexec "$@"\n',{mode:0o755});
+  }
+  fs.writeFileSync(path.join(bin,'mountpoint'),'#!/bin/sh\necho "mountpoint $*" >> "$HOME/mountpoint.log"\n[ -f "$HOME/.agy-proc-mounted" ]\n',{mode:0o755});
+  fs.writeFileSync(path.join(bin,'mount'),'#!/bin/sh\necho "mount $*" >> "$HOME/mount.log"\ntouch "$HOME/.agy-proc-mounted"\n',{mode:0o755});
+  fs.writeFileSync(path.join(bin,'systemctl'),`#!/bin/sh
+echo "systemctl $*" >> "$HOME/systemctl.log"
+if [ "$1" = "enable" ] && [ "$2" = "--now" ] && [ "$3" = "agy-proc.service" ]; then
+  f="$LIMING_SYSTEMD_DIR/agy-proc.service"
+  [ -f "$f" ] || exit 1
+  grep -qF "mountpoint -q /run/agy-proc || mount -t proc -o nosuid,nodev,noexec proc /run/agy-proc" "$f" || exit 1
+  mountpoint -q /run/agy-proc || mount -t proc -o nosuid,nodev,noexec proc /run/agy-proc
+fi
+`,{mode:0o755});
+  fs.writeFileSync(path.join(bin,'unshare'),'#!/bin/sh\necho "unshare $*" >> "$HOME/unshare.log"\n[ ! -f "$HOME/.unshare-fail" ] && [ -f "$HOME/.agy-proc-mounted" ]\n',{mode:0o755});
   fs.writeFileSync(path.join(bin,'npm'),`#!/bin/sh\necho "npm $*" >> "$HOME/remote.log"\ncase "$*" in *@playwright/cli*) printf '#!/bin/sh\\necho "playwright-cli $*" >> "$HOME/remote.log"\\n' > "${bin}/playwright-cli"; chmod +x "${bin}/playwright-cli";; esac\n`,{mode:0o755});
   return h;
 }
@@ -80,7 +97,7 @@ function rig(t,{input=[KEYS.li2,KEYS.li]}={}){
   const zip=path.join(d,'gw.zip'),z=makeZip(zip);
   remoteHome(d,'li2');remoteHome(d,'li');
   const home=path.join(d,'tablet-home');fs.mkdirSync(home);
-  const env={PATH:curlBin+':'+process.env.PATH,HOME:home,FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
+  const env={PATH:curlBin+':'+process.env.PATH,HOME:home,TMPDIR:os.tmpdir(),FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
     LIMING_GW_DIR:path.join(d,'gw'),LIMING_PLUGIN_DIR:path.join(d,'plugin'),LIMING_CREW_PLUGIN_DIR:path.join(d,'crew-plugin'),
     LIMING_IB_DIR:path.join(d,'keys'),LIMING_BIN_DIR:path.join(d,'usr-bin'),LIMING_CREW_STATE:path.join(d,'crew-state'),
     LIMING_SKILL_DIR:path.join(d,'skills/liming-crew'),LIMING_OLD_SKILL_DIR:path.join(d,'skills/liming-cloud-computers'),
@@ -169,7 +186,6 @@ test('云端准备不再碰 Codex、Harness、网关 key 和小芯的服务',t=>
     fs.mkdirSync(path.join(h,'.config/systemd/user'),{recursive:true});
     fs.writeFileSync(path.join(h,'.config/systemd/user/xin-kernel-resident.service'),'[Unit]\n');
     fs.writeFileSync(path.join(h,'.config/systemd/user/xin-reaper.timer'),'[Unit]\n');
-    fs.writeFileSync(path.join(h,'bin/systemctl'),'#!/bin/sh\necho "systemctl $*" >> "$HOME/systemctl.log"\n',{mode:0o755});
   }
   const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
   for(const m of ['li2','li']){
@@ -180,7 +196,8 @@ test('云端准备不再碰 Codex、Harness、网关 key 和小芯的服务',t=>
     assert.equal(fs.readFileSync(path.join(h,'.profile'),'utf8'),origProfile,m+' .profile 不应变动');
     assert.equal(fs.readFileSync(path.join(h,'.config/liming/gateway.key'),'utf8'),origGwKey,m+' gateway.key 不应变动');
     assert.ok(!fs.existsSync(path.join(h,'dsh.log')),m+' 不应调远端 dsh');
-    assert.ok(!fs.existsSync(path.join(h,'systemctl.log')),m+' 不应调 systemctl');
+    const scLog=fs.existsSync(path.join(h,'systemctl.log'))?fs.readFileSync(path.join(h,'systemctl.log'),'utf8'):'';
+    assert.doesNotMatch(scLog,/--user|xin-/,m+' 不应碰小芯的用户级 systemd 服务');
   }
   assert.doesNotMatch(r.stdout,/Codex|Harness|手动切主机|小芯/);
   noSecrets(r);
@@ -410,4 +427,58 @@ test('取不到网关安装包时给出新提示，并继续装其余部分',t=>
   assert.ok(fs.existsSync(path.join(env.LIMING_BIN_DIR,'crew')),'其余部分（crew）照常装好');
   assert.ok(fs.existsSync(path.join(env.LIMING_SKILL_DIR,'SKILL.md')),'其余部分（技能）照常装好');
   assert.ok(fs.existsSync(path.join(env.LIMING_CREW_PLUGIN_DIR,'package.json')),'其余部分（插件）照常装好');
+});
+
+test('云端准备：写 agy-proc.service 并 enable --now；已挂着时不重复 mount；重跑不重写单元文件',t=>{
+  const {d,run}=rig(t);
+  // 模拟 li 上已经手工挂好 /run/agy-proc
+  fs.writeFileSync(path.join(d,'home-li/.agy-proc-mounted'),'1\n');
+  const r1=run();assert.equal(r1.status,0,r1.stdout+r1.stderr);
+  assert.match(r1.stdout,/li2：准备好了\n/);
+  assert.match(r1.stdout,/li：准备好了\n/);
+  for(const m of ['li2','li']){
+    const h=path.join(d,'home-'+m);
+    const unit=path.join(h,'etc-systemd/agy-proc.service');
+    assert.ok(fs.existsSync(unit),m+' 应写出 agy-proc.service');
+    const txt=fs.readFileSync(unit,'utf8');
+    assert.match(txt,/Type=oneshot/);
+    assert.match(txt,/RemainAfterExit=yes/);
+    assert.ok(txt.includes("ExecStart=/bin/sh -c 'mkdir -p /run/agy-proc && (mountpoint -q /run/agy-proc || mount -t proc -o nosuid,nodev,noexec proc /run/agy-proc)'"),m+' ExecStart 必须一致');
+    assert.match(txt,/WantedBy=multi-user\.target/);
+    assert.equal(mode(unit),0o644,m+' 单元文件权限应为 644');
+    const scLog=fs.readFileSync(path.join(h,'systemctl.log'),'utf8');
+    assert.match(scLog,/systemctl daemon-reload/);
+    assert.match(scLog,/systemctl enable --now agy-proc\.service/);
+    const unshareLog=fs.readFileSync(path.join(h,'unshare.log'),'utf8');
+    assert.match(unshareLog,/unshare -Urpf --mount-proc true/);
+  }
+  assert.ok(fs.existsSync(path.join(d,'home-li2/mount.log')),'li2 未挂载时应执行 mount');
+  assert.ok(!fs.existsSync(path.join(d,'home-li/mount.log')),'li 已挂着时不应重复 mount');
+
+  // 重跑：单元文件内容未变，不重写文件，也不再 cp
+  const unitLi2=path.join(d,'home-li2/etc-systemd/agy-proc.service');
+  const oldTime=new Date('2026-01-01T00:00:00Z');
+  fs.utimesSync(unitLi2,oldTime,oldTime);
+  const cpBefore=fs.readFileSync(path.join(d,'home-li2/sudo.log'),'utf8').split('\n').filter(l=>l.includes(' cp ')).length;
+  fs.writeFileSync(path.join(d,'tty'),'\n\n\n');
+  const r2=run();assert.equal(r2.status,0,r2.stdout+r2.stderr);
+  assert.equal(fs.statSync(unitLi2).mtimeMs,oldTime.getTime(),'重跑不应重写内容相同的单元文件');
+  const cpAfter=fs.readFileSync(path.join(d,'home-li2/sudo.log'),'utf8').split('\n').filter(l=>l.includes(' cp ')).length;
+  assert.equal(cpAfter,cpBefore,'重跑不应再次 cp 单元文件');
+});
+
+test('云端准备：unshare 检查失败或没有 sudo 时报 no-proc，小结说明沙箱坏了且不中断其它步骤',t=>{
+  const {d,run}=rig(t);
+  // li2：unshare 失败
+  fs.writeFileSync(path.join(d,'home-li2/.unshare-fail'),'1\n');
+  // li：没有 sudo
+  fs.rmSync(path.join(d,'home-li/bin/sudo'));
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  assert.match(r.stdout,/li2：准备好了；沙箱坏了，命令会频繁要批准/);
+  assert.match(r.stdout,/li：准备好了；沙箱坏了，命令会频繁要批准/);
+  for(const m of ['li2','li']){
+    const h=path.join(d,'home-'+m);
+    assert.ok(fs.existsSync(path.join(h,'.gemini/antigravity-cli/settings.json')),m+' 权限规则仍应写进去');
+    assert.match(fs.readFileSync(path.join(h,'remote.log'),'utf8'),/playwright-cli install-browser chromium/,m+' 后续步骤不能中断');
+  }
 });

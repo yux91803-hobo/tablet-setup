@@ -260,7 +260,8 @@ if [ -x "$HOME/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
 else
   st antigravity none
 fi
-# 3. Antigravity 沙箱放行 hcom 数据与程序目录（个人账号不认 unsandboxed，改用 permissions.allow 最小目录挂载；子命令放行沿用 hcom 自带的 command(hcom ...)）
+# 3. Antigravity 沙箱：放行 hcom 数据与程序目录 + 挂载不被遮挡的 /run/agy-proc（修 InstaBox 下用户命名空间 mount proc 报 EPERM）
+sandbox_cfg_ok=0
 if python3 - <<'PY' >/dev/null 2>&1
 import json, os, sys
 home = os.path.expanduser('~')
@@ -305,7 +306,55 @@ if changed:
     os.replace(tmp, cfg_path)
 PY
 then
+  sandbox_cfg_ok=1
+fi
+proc_ok=0
+if command -v sudo >/dev/null 2>&1 && sudo -n true </dev/null >/dev/null 2>&1; then
+  unit_dir="${LIMING_SYSTEMD_DIR:-/etc/systemd/system}"
+  unit_file="$unit_dir/agy-proc.service"
+  if tmp_unit=$(mktemp 2>/dev/null); then
+    cat >"$tmp_unit" <<'UNIT'
+[Unit]
+Description=Mount unmasked procfs for Antigravity sandbox
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'mkdir -p /run/agy-proc && (mountpoint -q /run/agy-proc || mount -t proc -o nosuid,nodev,noexec proc /run/agy-proc)'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    unit_ok=1
+    unit_changed=0
+    if [ ! -f "$unit_file" ] || ! cmp -s "$tmp_unit" "$unit_file" 2>/dev/null; then
+      if sudo -n mkdir -p "$unit_dir" </dev/null >/dev/null 2>&1 \
+         && sudo -n cp "$tmp_unit" "$unit_file" </dev/null >/dev/null 2>&1 \
+         && sudo -n chmod 644 "$unit_file" </dev/null >/dev/null 2>&1; then
+        unit_changed=1
+      else
+        unit_ok=0
+      fi
+    fi
+    rm -f "$tmp_unit"
+    if [ "$unit_ok" = 1 ]; then
+      if [ "$unit_changed" = 1 ]; then
+        sudo -n systemctl daemon-reload </dev/null >/dev/null 2>&1 || unit_ok=0
+      fi
+      if [ "$unit_ok" = 1 ] \
+         && sudo -n systemctl enable --now agy-proc.service </dev/null >/dev/null 2>&1 \
+         && command -v unshare >/dev/null 2>&1 \
+         && unshare -Urpf --mount-proc true </dev/null >/dev/null 2>&1; then
+        proc_ok=1
+      fi
+    fi
+  fi
+fi
+if [ "$sandbox_cfg_ok" = 1 ] && [ "$proc_ok" = 1 ]; then
   st sandbox ok
+elif [ "$proc_ok" != 1 ]; then
+  st sandbox no-proc
 else
   st sandbox failed
 fi
@@ -345,7 +394,11 @@ remote_setup() {
     logged-out) notes="$notes；Antigravity 还没登录";;
     none) notes="$notes；没装 Antigravity";;
   esac
-  [ "$(lmc sandbox)" = ok ] || notes="$notes；Antigravity 放行 hcom 规则没写进去"
+  case "$(lmc sandbox)" in
+    ok) ;;
+    no-proc) notes="$notes；沙箱坏了，命令会频繁要批准";;
+    *) notes="$notes；Antigravity 放行 hcom 规则没写进去";;
+  esac
   case "$(lmc gh)" in
     logged-out) notes="$notes；GitHub 还没登录（在这台的 Computer 页签运行 gh auth login）";;
     none) notes="$notes；没装 GitHub 命令行（gh）";;
@@ -372,7 +425,7 @@ dry_run_plan() {
   say "4. 网关没装就尝试从云电脑取安装包（取不到则跳过网关、继续装其余部分）；插件分别装到 $PLUGIN_DIR 和 $CREW_PLUGIN_DIR，第一次装时挂进 web 配置。"
   say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉；删掉旧技能目录 $OLD_SKILL_DIR。"
   say "6. 装 ib 到 $BIN_DIR/ib，crew 到 $BIN_DIR/crew，技能「团队」和 TEAM.template.md 到 $SKILL_DIR。"
-  say "7. 在每台云电脑上：固定装 hcom $HCOM_VERSION；在 Antigravity 设置里加 hcom 沙箱目录放行规则；看 Antigravity 和 GitHub（gh）登没登录；装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium。"
+  say "7. 在每台云电脑上：固定装 hcom $HCOM_VERSION；在 Antigravity 设置里加 hcom 沙箱目录放行规则并挂好 /run/agy-proc（agy-proc.service）；看 Antigravity 和 GitHub（gh）登没登录；装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium。"
 }
 
 summary() {
