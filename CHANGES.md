@@ -2,6 +2,24 @@
 
 最新的在最上面。搬出来以前的记录（2026-11-25、11-26）在 liming-work-site 仓库的 `docs/CHANGES.md`。
 
+## 2026-11-27 晚 crew 第一版实测复核修复（6 项）
+
+- **沙箱在 InstaBox 上起不来（`setup.sh`）**：
+  - **根因**：InstaBox 在 `/proc/sys/kernel/random/boot_id` 上盖了一层 tmpfs，Linux 内核 `fs/namespace.c` 的 `mnt_already_visible` 判定现有 `/proc` 被遮挡，拒绝子进程在新用户命名空间里再挂 proc（`mount(..., "proc", ...)` 返回 `EPERM`），导致 `agy` 每次先在沙箱里失败再走 `BypassSandbox`、频繁卡审批。
+  - **修法**：云端准备第 3 步通过 `sudo -n` 幂等安装 `/etc/systemd/system/agy-proc.service`（`Type=oneshot`、`RemainAfterExit=yes`，`ExecStart` 仅在 `/run/agy-proc` 未挂载时执行 `mount -t proc -o nosuid,nodev,noexec proc /run/agy-proc`），执行 `systemctl daemon-reload` 和 `systemctl enable --now agy-proc.service`，最后用 `unshare -Urpf --mount-proc true` 检查；挂不上或没有 sudo 时报 `LMC sandbox no-proc`（小结提示「沙箱坏了，命令会频繁要批准」）且不中断其余步骤。
+- **空闲 agent 收不到 `crew send`（`crew.sh`）**：
+  - **根因**：`agy` 1.5.18 刚启动时输入框里显示非暗色的模式提示（如 `Auto mode: edits & safe commands auto-approved (shift+tab to cycle)`），hcom 0.7.31 的 `src/pty/screen.rs`（`get_antigravity_input_text`）只把暗色字当占位提示，误以为输入框有未发出文字而一直不投递。
+  - **修法**：`crew send` 在同一次 `ib exec` 里发完消息后每秒轮询 `hcom list --json` 确认送达（`unread_count == 0` 或 `status == active`）；约 3 秒后仍未送到且 `status == listening`、画面 `ready == true`、`prompt_empty == false` 且 `input_text` 完全匹配 `^[A-Za-z-]+ mode: .*\(shift\+tab to cycle\)$` 时，仅补一次 `hcom term inject <name> '<hcom>' --enter` 并最多再等 10 秒确认；输入框是别的文字时不注入并提示清空后再送；`active` 时绝不注入。
+- **隐藏画面里的谷歌账号邮箱（`crew.sh`）**：`crew screen` 的普通输出和 `--json` 输出所有字符串字段，以及 `crew start` 出错时打印的画面片段，均按 `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}` 替换为「（邮箱已隐藏）」。
+- **区分 `starting` 状态（`crew.sh`、`liming-crew/lib/views.js`）**：`get_machine_info` 不再把 `starting` 归入 `paused`，`crew status` 与插件状态条、成员卡均显示「正在叫醒」。
+- **叫停后状态一直显示「干活中」（`crew.sh`、`liming-crew/lib/views.js`）**：
+  - **根因**：`agy` 被 ESC 打断时不触发钩子，hcom `src/delivery.rs` 只有在有待送消息时才会在画面 10 秒不变后自愈（`pty:recovered`）。
+  - **修法**：`crew stop` 注入 ESC 后每秒查 `hcom term <name> --json` 最多 8 秒，等到 `ready == true` 后把当前 epoch 秒写进 `$STATE_DIR/<机器>.stopped-at` 并输出「已叫停 `<机器>`」（退出码 0），等不到则提示看 `crew screen` 并以 9 退出；`crew status`、状态缓存和插件面板在 `active` 开始时间早于 `stopped-at` 时显示「空闲（刚叫停）」（JSON 写 `status: "listening"` 并加 `"stopped": true`）；`crew wait` 遇到此类状态立即按空闲返回 0。
+- **关掉 InstaBox 更新提示（`ib.sh`）**：调用 `instabox` 前 `export INSTABOX_NO_UPDATE_CHECK=1`，避免 stderr 每次多出版本更新提示。
+- **参考**：hcom 0.7.31 源码 `src/pty/screen.rs`（`get_antigravity_input_text`）、`src/delivery.rs`（`pty:recovered`）；Linux 内核 `fs/namespace.c`（`mnt_already_visible`）；InstaBox 文档（`INSTABOX_NO_UPDATE_CHECK`）。
+- **验证**：`node --test test/*.test.cjs` 97/97 通过（新增测试均先红后绿）；CI 写法 `shellcheck setup.sh ib.sh crew.sh` 无警告；`kit/bin/check.mjs liming-crew --load --lang zh`、`--budget panel`、`--budget strip` 均 0 错误、0 警告。
+- **谁做的**：实现：Antigravity（Gemini 4 Neon）；复核：Claude Code。
+
 ## 2026-11-27 crew 第一版：平板 DSH 带 li、li2 上的 Antigravity 组队干活
 
 - **站长说的**：平时只和 DSH 聊天，由 DSH 拆活、派活、验收、汇报；两台 Antigravity 之间**不直接对话，由 DSH 居中转达**；随时能在 **DSH Go 里**看到两台 Antigravity 的真实工作过程，不想跳去 Antigravity 网页，还要能插话、叫停和批准。
