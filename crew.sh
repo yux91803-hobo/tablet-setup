@@ -1186,7 +1186,62 @@ print(json.dumps({"machine": m, "event": ev, "stopped": True}, ensure_ascii=Fals
   trap 'wait_cleanup_jobs -1; exit 143' TERM
   trap 'wait_cleanup_jobs -1; exit 130' INT
 
-  local i last_id sql qsql job_raw job_id
+  local i last_id sql qsql job_raw job_id wait_py
+  # 单次后台任务里按三步执行，避免 hcom events --wait 的 10 秒回看和 ORDER BY id DESC 漏事件：
+  # 1) 先非阻塞查 id > last_id 最小的一条；2) 没有再 --wait；3) 等到后再非阻塞查一次取最小 id。
+  wait_py='import json, subprocess, sys
+sql, wait_sec = sys.argv[1], sys.argv[2]
+def query_earliest():
+    r = subprocess.run(["hcom", "events", "--sql", sql, "--last", "500"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    best = None
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(ev, dict) and isinstance(ev.get("id"), int) and not ev.get("timed_out"):
+            if best is None or ev["id"] < best["id"]:
+                best = ev
+    return best
+ev = query_earliest()
+if ev is not None:
+    print(json.dumps(ev, ensure_ascii=False))
+    sys.exit(0)
+w = subprocess.run(["hcom", "events", "--wait", wait_sec, "--sql", sql], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+if w.returncode != 0:
+    if w.stdout.strip():
+        sys.stdout.write(w.stdout)
+    else:
+        print(json.dumps({"timed_out": True}))
+    sys.exit(1)
+wait_ev = None
+for line in w.stdout.splitlines():
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(d, dict):
+        if d.get("timed_out"):
+            print(json.dumps({"timed_out": True}))
+            sys.exit(1)
+        if isinstance(d.get("id"), int):
+            wait_ev = d
+            break
+ev2 = query_earliest()
+chosen = ev2 if ev2 is not None else wait_ev
+if chosen is not None:
+    print(json.dumps(chosen, ensure_ascii=False))
+    sys.exit(0)
+print(json.dumps({"timed_out": True}))
+sys.exit(1)'
   for i in "${!active_m[@]}"; do
     m=${active_m[$i]}
     base=${active_base[$i]}
@@ -1198,7 +1253,7 @@ print(json.dumps({"machine": m, "event": ev, "stopped": True}, ensure_ascii=Fals
     fi
     sql="((type = 'message' AND (instance = '$base' OR msg_from = '$base')) OR (type = 'status' AND instance = '$base' AND status_val IN ('listening', 'blocked') AND COALESCE(status_context, '') NOT IN ('start', 'pty:recovered'))) AND id > $last_id"
     printf -v qsql '%q' "$sql"
-    if ! job_raw=$("$IB" exec --background --json "$m" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; hcom events --wait $wait_sec --sql $qsql" </dev/null 2>/dev/null); then
+    if ! job_raw=$("$IB" exec --background --json "$m" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; python3 -c '$wait_py' $qsql $wait_sec" </dev/null 2>/dev/null); then
       wait_cleanup_jobs -1
       trap - TERM INT
       say_err "在 $m 上启动后台等待失败"

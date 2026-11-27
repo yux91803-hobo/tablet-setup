@@ -180,37 +180,66 @@ if (sub === 'send') {
   process.exit(0);
 }
 if (sub === 'events') {
-  let raw = readOr('events.jsonl', '');
-  let lines = raw.split('\\n').filter(Boolean).map(l => JSON.parse(l));
+  const loadEvents = () => {
+    const raw = readOr('events.jsonl', '');
+    const extraPath = path.join(fakeDir, machine + '-runtime-events.jsonl');
+    const extra = fs.existsSync(extraPath) ? fs.readFileSync(extraPath, 'utf8') : '';
+    return (raw + '\\n' + extra).split('\\n').filter(Boolean).map(l => JSON.parse(l));
+  };
   const sqlIdx = args.indexOf('--sql');
   const sql = (sqlIdx !== -1 && args[sqlIdx + 1]) ? args[sqlIdx + 1] : '';
-  if (sql) {
-    const m = /id\\s*>\\s*(\\d+)/i.exec(sql);
-    if (m) {
-      const since = Number(m[1]);
-      lines = lines.filter(e => Number(e.id) > since);
+  const filterBySql = (list) => {
+    let out = list.slice();
+    if (sql) {
+      const m = /id\\s*>\\s*(\\d+)/i.exec(sql);
+      if (m) {
+        const since = Number(m[1]);
+        out = out.filter(e => Number(e.id) > since);
+      }
+      if (/status_val\\s+IN/i.test(sql)) {
+        const exclStart = /'start'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
+        const exclRec = /'pty:recovered'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
+        out = out.filter(e => {
+          if (e.type === 'message' && !String(e.instance || '').startsWith('ext_')) return true;
+          if (e.type === 'status' && e.data && (e.data.status === 'listening' || e.data.status === 'blocked')) {
+            const ctx = String(e.data.context || '');
+            if (exclStart && ctx === 'start') return false;
+            if (exclRec && ctx === 'pty:recovered') return false;
+            return true;
+          }
+          return false;
+        });
+      }
     }
-  }
+    out.sort((a, b) => Number(a.id) - Number(b.id));
+    return out;
+  };
   const waitIdx = args.indexOf('--wait');
   if (waitIdx !== -1) {
     const waitSec = Number(args[waitIdx + 1] || '60');
     const delayMs = Number(readOr('wait-delay-ms', '0'));
-    const exclStart = /'start'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
-    const exclRec = /'pty:recovered'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
-    // 过滤：只保留 agent 发出的消息，或 listening/blocked 状态事件（按 SQL 排除 start / pty:recovered）
-    const matched = lines.filter(e => {
-      if (e.type === 'message' && !String(e.instance || '').startsWith('ext_')) return true;
-      if (e.type === 'status' && e.data && (e.data.status === 'listening' || e.data.status === 'blocked')) {
-        const ctx = String(e.data.context || '');
-        if (exclStart && ctx === 'start') return false;
-        if (exclRec && ctx === 'pty:recovered') return false;
-        return true;
-      }
-      return false;
-    });
+    const onWaitRaw = readOr('events-on-wait.jsonl', '');
+    const blindBacklog = readOr('wait-blind-backlog', '').trim() === '1';
+    if (onWaitRaw.trim()) {
+      setTimeout(() => {
+        const extraPath = path.join(fakeDir, machine + '-runtime-events.jsonl');
+        if (!fs.existsSync(extraPath)) fs.writeFileSync(extraPath, onWaitRaw);
+        const matched = filterBySql(loadEvents());
+        if (matched.length > 0) {
+          // 模拟真实 hcom 0.7.31 events_wait：ORDER BY id DESC LIMIT 1，只返回最新一条
+          process.stdout.write(JSON.stringify(matched[matched.length - 1]) + '\\n');
+          process.exit(0);
+        } else {
+          process.stdout.write(JSON.stringify({ timed_out: true }) + '\\n');
+          process.exit(1);
+        }
+      }, delayMs);
+      return;
+    }
+    const matched = blindBacklog ? [] : filterBySql(loadEvents());
     if (matched.length > 0) {
       setTimeout(() => {
-        process.stdout.write(JSON.stringify(matched[0]) + '\\n');
+        process.stdout.write(JSON.stringify(matched[matched.length - 1]) + '\\n');
         process.exit(0);
       }, delayMs);
     } else {
@@ -221,6 +250,7 @@ if (sub === 'events') {
     }
     return;
   }
+  let lines = filterBySql(loadEvents());
   const lastIdx = args.indexOf('--last');
   if (lastIdx !== -1 && args[lastIdx + 1]) {
     const n = Number(args[lastIdx + 1]);
@@ -1197,4 +1227,51 @@ test('wait：排除 status_context 为 start 和 pty:recovered 的状态事件�
   assert.ok(evCalls.length >= 1);
   const sql = evCalls[0].args[evCalls[0].args.indexOf('--sql') + 1] || '';
   assert.match(sql, /COALESCE\(status_context,\s*''\)\s+NOT\s+IN\s*\(\s*'start'\s*,\s*'pty:recovered'\s*\)/i, 'SQL 应安全排除 start 和 pty:recovered：' + sql);
+});
+
+test('wait：不漏积压事件且按 id 顺序逐条返回（涵盖 --wait 看不到积压与 --wait 只返回最新一条）', (t) => {
+  const ev410 = { id: 410, instance: 'keno', type: 'message', ts: '2026-11-27T15:01:00', data: { from: 'keno', text: '我是 li2，已报到' } };
+  const ev411 = { id: 411, instance: 'keno', type: 'status', ts: '2026-11-27T15:01:02', data: { status: 'listening', context: '' } };
+
+  // 情况 1：积压事件超过 10 秒回看窗口（wait-blind-backlog=1 模拟 --wait 根本看不到积压）
+  const r1Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-events.jsonl': [ev410, ev411].map(e => JSON.stringify(e)).join('\n') + '\n',
+      'li2-wait-blind-backlog': '1',
+    },
+  });
+  const w1 = r1Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(w1.status, 0, '第 1 步补查应拿到积压的 410：' + w1.stdout + w1.stderr);
+  assert.equal(JSON.parse(w1.stdout).event.id, 410);
+  assert.equal(fs.readFileSync(path.join(r1Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '410');
+  assert.equal(r1Rig.ibLog().filter(l => l.includes('--background')).length, 1, '仍只启一次 ib exec --background');
+
+  const w2 = r1Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(w2.status, 0, '第二次 wait 应拿到下一条 411：' + w2.stdout + w2.stderr);
+  assert.equal(JSON.parse(w2.stdout).event.id, 411);
+  assert.equal(fs.readFileSync(path.join(r1Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '411');
+
+  // 情况 2：启动时无积压，等待期间连续到达 420（消息）和 421（空闲），--wait 只返回 421；第 3 步补查应返回更早的 420
+  const ev420 = { id: 420, instance: 'keno', type: 'message', ts: '2026-11-27T15:02:00', data: { from: 'keno', text: '改好了' } };
+  const ev421 = { id: 421, instance: 'keno', type: 'status', ts: '2026-11-27T15:02:01', data: { status: 'listening', context: '' } };
+  const r2Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-events.jsonl': '',
+      'li2-events-on-wait.jsonl': [ev420, ev421].map(e => JSON.stringify(e)).join('\n') + '\n',
+      'li2-wait-delay-ms': '100',
+    },
+  });
+  const w3 = r2Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '5' } });
+  assert.equal(w3.status, 0, w3.stdout + w3.stderr);
+  assert.equal(JSON.parse(w3.stdout).event.id, 420, '等到了以后再补查应先返回更早的 420，不跳到 421');
+  assert.equal(fs.readFileSync(path.join(r2Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '420');
+
+  const w4 = r2Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '5' } });
+  assert.equal(w4.status, 0, w4.stdout + w4.stderr);
+  assert.equal(JSON.parse(w4.stdout).event.id, 421, '再 wait 一次拿到 421');
+  assert.equal(fs.readFileSync(path.join(r2Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '421');
 });
