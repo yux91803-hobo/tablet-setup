@@ -791,18 +791,93 @@ cmd_send() {
     msg="$*"
   fi
 
-  local ag name qname
+  local ag name qname qm send_poll send_wait send_after qpoll qwait qafter verify_py send_cmd
   ag=$(require_crew_agent "$m")
   name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
   printf -v qname '%q' "$name"
+  printf -v qm '%q' "$m"
+  send_poll=${LIMING_CREW_SEND_POLL:-1}
+  send_wait=${LIMING_CREW_SEND_WAIT:-3}
+  send_after=${LIMING_CREW_SEND_AFTER:-10}
+  printf -v qpoll '%q' "$send_poll"
+  printf -v qwait '%q' "$send_wait"
+  printf -v qafter '%q' "$send_after"
+
+  # 发完消息后在同一次 ib exec 里确认送达；若 agy 刚启动时模式提示卡住投递，仅在空闲且画面完全匹配模式提示时补一次唤醒
+  verify_py='import json, re, subprocess, sys, time
+name, machine = sys.argv[1], sys.argv[2]
+poll_sec, wait_sec, after_sec = float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
+MODE_RE = re.compile(r"^[A-Za-z-]+ mode: .*\(shift\+tab to cycle\)$")
+def get_agent():
+    r = subprocess.run(["hcom", "list", "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout)
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+    for it in items:
+        if isinstance(it, dict) and it.get("name") == name:
+            return it
+    return None
+def get_term():
+    r = subprocess.run(["hcom", "term", name, "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    try:
+        d = json.loads(r.stdout)
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+deadline = time.monotonic() + wait_sec
+ag = None
+while True:
+    ag = get_agent()
+    if ag is not None:
+        st = str(ag.get("status") or "")
+        unread = int(ag.get("unread_count") or 0)
+        if unread == 0 or st == "active":
+            sys.exit(0)
+    rem = deadline - time.monotonic()
+    if rem <= 0:
+        break
+    time.sleep(min(poll_sec, rem))
+st = str(ag.get("status") or "") if isinstance(ag, dict) else ""
+if st == "listening":
+    term = get_term()
+    if isinstance(term, dict):
+        ready = term.get("ready") is True
+        prompt_empty = term.get("prompt_empty")
+        input_text = str(term.get("input_text") or "").strip()
+        if ready and prompt_empty is False and MODE_RE.fullmatch(input_text):
+            subprocess.run(["hcom", "term", "inject", name, "<hcom>", "--enter"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline2 = time.monotonic() + after_sec
+            while True:
+                ag2 = get_agent()
+                if ag2 is not None and int(ag2.get("unread_count") or 0) == 0:
+                    sys.exit(0)
+                rem2 = deadline2 - time.monotonic()
+                if rem2 <= 0:
+                    break
+                time.sleep(min(poll_sec, rem2))
+            sys.stderr.write(f"消息已排队，{machine} 下次空闲时送到\n")
+            sys.exit(0)
+        if prompt_empty is False and input_text and not MODE_RE.fullmatch(input_text):
+            sys.stderr.write(f"消息已排队：{machine} 的输入框里有没发出的文字，清空后才会送到\n")
+            sys.exit(0)
+sys.stderr.write(f"消息已排队，{machine} 下次空闲时送到\n")
+sys.exit(0)'
+  send_cmd="hcom send --from bigboss @$qname >/dev/null && python3 -c '$verify_py' $qname $qm $qpoll $qwait $qafter </dev/null"
 
   if [ "$use_stdin" = 1 ]; then
-    if ! remote_stdin "$m" "hcom send --from bigboss @$qname" >/dev/null; then
+    if ! remote_stdin "$m" "$send_cmd" >/dev/null; then
       say_err "向 $m 发送消息失败"
       exit 9
     fi
   else
-    if ! printf '%s' "$msg" | remote_stdin "$m" "hcom send --from bigboss @$qname" >/dev/null; then
+    if ! printf '%s' "$msg" | remote_stdin "$m" "$send_cmd" >/dev/null; then
       say_err "向 $m 发送消息失败"
       exit 9
     fi

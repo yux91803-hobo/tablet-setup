@@ -145,11 +145,21 @@ const nextFromSeq = (key, fallbackName, fallbackVal) => {
 };
 const sub = args[0];
 if (sub === 'list') {
+  if (fs.existsSync(path.join(fakeDir, machine + '-injected'))) {
+    const after = readOr('list-after-inject.json', '');
+    if (after) {
+      process.stdout.write(after);
+      process.exit(0);
+    }
+  }
   process.stdout.write(nextFromSeq('list', 'list.json', '[]'));
   process.exit(0);
 }
 if (sub === 'term') {
   if (args[1] === 'inject') {
+    if (args.includes('<hcom>')) {
+      fs.writeFileSync(path.join(fakeDir, machine + '-injected'), '1');
+    }
     process.exit(0);
   }
   process.stdout.write(nextFromSeq('term', 'term.json', '{}'));
@@ -243,6 +253,7 @@ function rig(t, { machines = {}, hcomFiles = {} } = {}) {
   const env = {
     PATH: process.env.PATH,
     HOME: homeDir,
+    TMPDIR: os.tmpdir(),
     FAKE_DIR: d,
     LIMING_IB: ibPath,
     LIMING_CREW_STATE: stateDir,
@@ -641,6 +652,7 @@ test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令�
     '第一行\n第二行',
     '中文和 emoji 🚀✨',
   ];
+  let firstSendIb = null;
   for (const msg of cases) {
     const { run, ibLog, hcomLog } = rig(t, {
       machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
@@ -656,7 +668,10 @@ test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令�
     assert.ok(!sendCall.args.includes('--stdin'), 'hcom 0.7.31 走管道不传 --stdin');
     assert.ok(!sendCall.args.join(' ').includes(msg), '文字不能出现在 hcom 参数里');
     const sendIb = ibLog().find(l => l.includes('hcom send'));
-    assert.equal(sendIb, 'exec li2 --stdin --timeout 60 -- export PATH="$HOME/.local/bin:$PATH"; hcom send --from bigboss @crew-keno', 'ib 参数里只应有固定命令，不能含用户文字');
+    assert.ok(sendIb && sendIb.startsWith('exec li2 --stdin --timeout 60 -- '), '应经 ib exec --stdin 发送');
+    assert.ok(sendIb.includes('hcom send --from bigboss @crew-keno'));
+    if (firstSendIb === null) firstSendIb = sendIb;
+    assert.equal(sendIb, firstSendIb, 'ib 参数里只应有固定命令，不能含用户文字');
   }
   // --stdin 模式也逐字节原样到达
   const raw = '单引号\'双引号"$HOME`id`\n-n 第二行\n';
@@ -668,7 +683,98 @@ test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令�
   assert.equal(r2.status, 0, r2.stderr);
   const s2 = rig2.hcomLog().find(c => c.args[0] === 'send');
   assert.equal(s2.stdin, raw);
-  assert.equal(rig2.ibLog().find(l => l.includes('hcom send')), 'exec li2 --stdin --timeout 60 -- export PATH="$HOME/.local/bin:$PATH"; hcom send --from bigboss @crew-keno');
+  assert.equal(rig2.ibLog().find(l => l.includes('hcom send')), firstSendIb);
+});
+
+test('send：立刻送到不注入；active 时绝不注入', (t) => {
+  const fastEnv = { LIMING_CREW_SEND_POLL: '0.05', LIMING_CREW_SEND_WAIT: '0.15', LIMING_CREW_SEND_AFTER: '0.3' };
+  // 立刻送到（unread_count=0）
+  const r1Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 0 }),
+      'li2-term.json': JSON.parse(readFixture('term-remote.json')),
+    },
+  });
+  const r1 = r1Rig.run(['send', 'li2', '你好'], { env: fastEnv });
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.equal(r1.stderr, '');
+  assert.equal(r1Rig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject').length, 0, '立刻送到不能注入');
+
+  // agent 正在 active 且有未读：绝不注入
+  const r2Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active', unread_count: 1 }),
+      'li2-term.json': JSON.parse(readFixture('term-remote.json')),
+    },
+  });
+  const r2 = r2Rig.run(['send', 'li2', '插句话'], { env: fastEnv });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(r2.stderr, '');
+  assert.equal(r2Rig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject').length, 0, 'active 时绝不能注入');
+});
+
+test('send：空闲有未读且框里是模式提示时注入一次 <hcom> --enter；补一次仍未送到只提示不循环', (t) => {
+  const fastEnv = { LIMING_CREW_SEND_POLL: '0.05', LIMING_CREW_SEND_WAIT: '0.15', LIMING_CREW_SEND_AFTER: '0.3' };
+  for (const hint of [
+    'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)',
+    'Best-of-N mode: multiple candidates (shift+tab to cycle)',
+  ]) {
+    const term = JSON.parse(readFixture('term-remote.json'));
+    term.input_text = hint;
+    term.ready = true;
+    term.prompt_empty = false;
+    const rRig = rig(t, {
+      machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+      hcomFiles: {
+        'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 1 }),
+        'li2-list-after-inject.json': makeCrewListFixture({ status: 'listening', unread_count: 0 }),
+        'li2-term.json': term,
+      },
+    });
+    const r = rRig.run(['send', 'li2', '干活吧'], { env: fastEnv });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, '', '补一次后送到不应报排队提示');
+    const injects = rRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+    assert.equal(injects.length, 1, '应注入恰好一次：' + hint);
+    assert.deepEqual(injects[0].args, ['term', 'inject', 'crew-keno', '<hcom>', '--enter']);
+    const execs = rRig.ibLog().filter(l => l.startsWith('exec '));
+    assert.equal(execs.length, 2, '发送与确认唤醒应在同一次 ib exec 里完成（加上前置查 agent 共 2 次）');
+  }
+
+  // 补了一次仍未送到：只注入 1 次，stderr 提示下次空闲时送到，退出 0
+  const stuckRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 1 }),
+      'li2-term.json': JSON.parse(readFixture('term-remote.json')),
+    },
+  });
+  const rs = stuckRig.run(['send', 'li2', '还在吗'], { env: fastEnv });
+  assert.equal(rs.status, 0, rs.stderr);
+  assert.match(rs.stderr, /消息已排队，li2 下次空闲时送到/);
+  const stuckInjects = stuckRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject');
+  assert.equal(stuckInjects.length, 1, '只补一次，不能循环注入');
+});
+
+test('send：空闲有未读但框里是别的文字时不注入，提示清空后才会送到', (t) => {
+  const fastEnv = { LIMING_CREW_SEND_POLL: '0.05', LIMING_CREW_SEND_WAIT: '0.15', LIMING_CREW_SEND_AFTER: '0.3' };
+  const term = JSON.parse(readFixture('term-remote.json'));
+  term.input_text = '站长自己打了一半的字';
+  term.ready = true;
+  term.prompt_empty = false;
+  const rRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 1 }),
+      'li2-term.json': term,
+    },
+  });
+  const r = rRig.run(['send', 'li2', '发条消息'], { env: fastEnv });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /消息已排队：li2 的输入框里有没发出的文字，清空后才会送到/);
+  assert.equal(rRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject').length, 0, '有人打字时绝不能注入');
 });
 
 test('冷却时 send 以 5 退出，没 exec', (t) => {
