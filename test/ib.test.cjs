@@ -1,6 +1,5 @@
 // 平板上的 ib（ib.sh，装成 /usr/local/bin/ib）：li、li2 在两个 InstaBox 账号里，
 // ib 用法和 instabox 一样，按参数里的机器名选那台所在账号的 key，只经环境变量交给 instabox，从不打印。
-// 以及平板 AI 读的技能 skills/liming-cloud-computers/SKILL.md。
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,7 +8,6 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const IB = path.join(__dirname, '../ib.sh');
-const SKILL = path.join(__dirname, '../skills/liming-cloud-computers/SKILL.md');
 const KEYS = { li: 'ibk_li_SECRET_1111', li2: 'ibk_li2_SECRET_2222' };
 
 function rig(t, { keys = KEYS, exitCode = 0 } = {}) {
@@ -89,26 +87,4 @@ test('ib：key 只经环境变量交给 instabox，脚本里不用 env 带参数
   assert.doesNotMatch(src, /\benv\s+INSTABOX_API_KEY=/);
   assert.doesNotMatch(src, /set\s+-[a-z]*x/);
   assert.equal(spawnSync('sh', ['-n', IB]).status, 0);
-});
-
-test('技能：front matter 有 name 和 description，正文讲 ib、长任务、浏览器、交给 Codex 再自己检查；不含 key', () => {
-  const s = fs.readFileSync(SKILL, 'utf8');
-  const m = /^---\n([\s\S]*?)\n---\n/.exec(s);
-  assert.ok(m, '要有 front matter');
-  assert.match(m[1], /^name: liming-cloud-computers$/m);
-  assert.match(m[1], /^description: .*li.*li2/m);
-  for (const want of ['ib exec', 'run_in_background', 'ib jobs wait', 'playwright-cli', '--headed', 'ib agent prompt', '--provider codex', 'git diff', 'Computer']) assert.ok(s.includes(want), want);
-  assert.doesNotMatch(s, /ibk_[A-Za-z0-9]{6,}|ibssh_[A-Za-z0-9]{6,}|sk-[A-Za-z0-9]{12,}/);
-  assert.ok(Buffer.byteLength(s) < 8 * 1024, '技能正文别太长');
-});
-
-test('技能按机器分工：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity；云上的 Claude Code 不用', () => {
-  const s = fs.readFileSync(SKILL, 'utf8');
-  assert.ok(s.includes('ib agent prompt li --provider codex'), 'Codex 只派给 li');
-  assert.doesNotMatch(s, /ib agent prompt li2\b/, 'li2 不用 Codex');
-  assert.match(s, /ib exec --background li2 -- '[^']*dsh-task /, 'Harness 在 li2 上经 dsh-task 用');
-  for (const want of ['agy -p', '--dangerously-skip-permissions', '--output-format json', 'conversation_id', '--conversation', 'agy models', '--session-id'])
-    assert.ok(s.includes(want), want);
-  assert.match(s, /Claude Code[^\n]*不用/);
-  assert.doesNotMatch(s, /还没登录，别用/);
 });

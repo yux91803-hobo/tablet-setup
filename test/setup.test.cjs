@@ -1,4 +1,4 @@
-// 装机脚本 setup.sh（设计：liming-work-site 仓库 docs/superpowers/specs/2026-11-26-tablet-cloud-direct-design.md；网关部分沿用 2026-11-25-tablet-dshgo-design.md）
+// 装机脚本 setup.sh（设计：docs/superpowers/specs/2026-11-27-crew-design.md；网关部分沿用 2026-11-25-tablet-dshgo-design.md）
 // 假 instabox：按 INSTABOX_API_KEY 认是哪个账号（看不到别的账号的机器）；get 回机器信息；pull 给测试 zip（有 no-zip-<机器> 标记时报错）；
 // exec --stdin <机器> -- bash -s 在那台自己的临时 HOME 里真的执行装机脚本送去的云端准备脚本（有 cooling-<机器> 标记时报冷却）。
 const test=require('node:test'),assert=require('node:assert/strict');
@@ -8,6 +8,19 @@ const root=path.resolve(__dirname,'..'),tablet=root,setup=path.join(tablet,'setu
 const tmp=t=>{const d=fs.mkdtempSync(path.join(os.tmpdir(),'tablet-setup-'));t.after(()=>fs.rmSync(d,{recursive:true,force:true}));return d;};
 const KEYS={li2:'ibk_li2_SECRET_aaaa1111',li:'ibk_li_SECRET_bbbb2222'};
 const REMOTE_ZIP='/data/workbuddy-gateway/releases/workbuddy2api-hub-v2.0.8.zip';
+const BASE_CMDS=['bash','sh','python3','sed','grep','cat','tr','head','tail','cut','wc','mkdir','rm','mv','cp','chmod','cmp','date','uname','id','env','dirname','basename','mktemp','sleep','kill','touch','ls','true','false','echo','printf','test','['];
+// 只把 bash 和基础工具放进假云电脑的 PATH，避免宿主机器上装的 codex、agy、gh、uv、hcom 混进测试
+function makeBaseBin(dir){
+  const b=path.join(dir,'base-bin');fs.mkdirSync(b,{recursive:true});
+  const dirs=['/usr/bin','/bin'];
+  for(const cmd of BASE_CMDS){
+    for(const sd of dirs){
+      const p=path.join(sd,cmd);
+      if(fs.existsSync(p)){fs.symlinkSync(p,path.join(b,cmd));break;}
+    }
+  }
+  return b;
+}
 const FAKE_IB=`#!/usr/bin/env bash
 acct=unknown
 [ "\${INSTABOX_API_KEY-}" = "$KEY_LI2" ] && acct=li2
@@ -19,7 +32,7 @@ case "$1" in
   pull) [ "$acct" = "$2" ] || exit 1; [ -f "$FAKE_DIR/no-zip-$2" ] && { echo "pull: no such file" >&2; exit 1; }; cp "$FAKE_ZIP" "$4";;
   exec) m=$2; [ "$acct" = "$m" ] || exit 1
     [ -f "$FAKE_DIR/cooling-$m" ] && { echo "error: $m is cooling down" >&2; exit 1; }
-    HOME="$FAKE_DIR/home-$m" PATH="$FAKE_DIR/home-$m/bin:$PATH" LIMING_REMOTE_WS="$FAKE_DIR/ws-$m" bash -s;;
+    HOME="$FAKE_DIR/home-$m" PATH="$FAKE_DIR/home-$m/bin:$FAKE_DIR/base-bin" LIMING_REMOTE_WS="$FAKE_DIR/ws-$m" bash -s;;
   *) echo "unexpected: $*" >&2; exit 2;;
 esac
 `;
@@ -29,36 +42,33 @@ function makeZip(file){
   assert.equal(r.status,0,String(r.stderr));
   const buf=fs.readFileSync(file);return {size:String(buf.length),sha:crypto.createHash('sha256').update(buf).digest('hex')};
 }
-// 一台「云电脑」的 HOME：有 Harness（dsh 记参数）、网关 key、codex（可选配置）、npm（装 playwright-cli 时放一个假的进 bin）
-function remoteHome(dir,m,{codexKey=false,codexConfig=null,codex=true,agy='logged-in'}={}){
+// 一台「云电脑」的 HOME：有 npm（装 playwright-cli 时放一个假的进 bin）、可选 Antigravity
+function remoteHome(dir,m,{agy='logged-in'}={}){
   const h=path.join(dir,'home-'+m),bin=path.join(h,'bin');
-  for(const p of ['.local/bin','.xin','bin'])fs.mkdirSync(path.join(h,p),{recursive:true});
-  // 假 Harness：记参数；--from-default-profile 时像真的一样在 ~/.dsh/profiles/<名字> 建出模板
-  fs.writeFileSync(path.join(h,'.local/bin/dsh'),'#!/bin/sh\necho "$*" >> "$HOME/dsh.log"\nn=\nwhile [ $# -gt 0 ]; do case "$1" in --profile) n=$2; shift;; --from-default-profile) f=1;; esac; shift; done\n[ -n "${f:-}" ] && [ -n "$n" ] && mkdir -p "$HOME/.dsh/profiles/$n" && echo "# shipped headless" > "$HOME/.dsh/profiles/$n/cordis.yml"\nexit 0\n',{mode:0o755});
-  fs.writeFileSync(path.join(h,'.xin/harness.key'),'remote-harness-key\n',{mode:0o600});
-  if(codexKey)fs.writeFileSync(path.join(h,'.xin/codex.key'),'remote-codex-key\n',{mode:0o600});
-  if(codex)fs.writeFileSync(path.join(bin,'codex'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  for(const p of ['.local/bin','bin'])fs.mkdirSync(path.join(h,p),{recursive:true});
   // Antigravity 命令行装在 ~/.local/bin/agy；登录后 ~/.gemini/antigravity-cli 里有令牌文件
   if(agy){fs.writeFileSync(path.join(h,'.local/bin/agy'),'#!/bin/sh\nexit 0\n',{mode:0o755});
     if(agy==='logged-in'){fs.mkdirSync(path.join(h,'.gemini/antigravity-cli'),{recursive:true});fs.writeFileSync(path.join(h,'.gemini/antigravity-cli/antigravity-oauth-token'),'fake-token\n',{mode:0o600});}}
-  if(codexConfig!==null){fs.mkdirSync(path.join(h,'.codex'),{recursive:true});fs.writeFileSync(path.join(h,'.codex/config.toml'),codexConfig,{mode:0o600});}
   fs.writeFileSync(path.join(bin,'npm'),`#!/bin/sh\necho "npm $*" >> "$HOME/remote.log"\ncase "$*" in *@playwright/cli*) printf '#!/bin/sh\\necho "playwright-cli $*" >> "$HOME/remote.log"\\n' > "${bin}/playwright-cli"; chmod +x "${bin}/playwright-cli";; esac\n`,{mode:0o755});
   return h;
 }
-const LI_CODEX='model = "deepseek-v4.1-flash"\nmodel_provider = "workbuddy"\n\n[model_providers.workbuddy]\nname = "WorkBuddy CN (li gateway)"\nbase_url = "http://127.0.0.1:8788/v1"\nwire_api = "responses"\n\n[features]\nx = true\n\n[mcp_servers.rea]\ncommand = "/x/rea.mjs"\n';
 function rig(t,{input=[KEYS.li2,KEYS.li]}={}){
-  const d=tmp(t),bin=path.join(d,'bin');fs.mkdirSync(bin);
+  const d=tmp(t),bin=path.join(d,'bin'),curlBin=path.join(d,'curl-bin');
+  fs.mkdirSync(bin);fs.mkdirSync(curlBin);
+  makeBaseBin(d);
+  const realCurl=spawnSync('which',['curl'],{encoding:'utf8'}).stdout.trim()||'/usr/bin/curl';
+  fs.writeFileSync(path.join(curlBin,'curl'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_DIR/curl.log"\nexec ${JSON.stringify(realCurl)} "$@"\n`,{mode:0o755});
   fs.writeFileSync(path.join(bin,'instabox'),FAKE_IB,{mode:0o755});
   fs.writeFileSync(path.join(bin,'dsh'),'#!/bin/sh\necho "$*" >> "$FAKE_DIR/dsh.log"\n',{mode:0o755});
   fs.writeFileSync(path.join(bin,'apt-get'),'#!/bin/sh\necho "$*" >> "$FAKE_DIR/apt.log"\n',{mode:0o755});
   fs.writeFileSync(path.join(bin,'npm'),'#!/bin/sh\necho "$*" >> "$FAKE_DIR/npm.log"\n',{mode:0o755});
   fs.writeFileSync(path.join(d,'tty'),input.join('\n')+'\n');
   const zip=path.join(d,'gw.zip'),z=makeZip(zip);
-  remoteHome(d,'li2');remoteHome(d,'li',{codexKey:true,codexConfig:LI_CODEX});
+  remoteHome(d,'li2');remoteHome(d,'li');
   const home=path.join(d,'tablet-home');fs.mkdirSync(home);
-  const env={PATH:process.env.PATH,HOME:home,FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
+  const env={PATH:curlBin+':'+process.env.PATH,HOME:home,FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
     LIMING_GW_DIR:path.join(d,'gw'),LIMING_PLUGIN_DIR:path.join(d,'plugin'),LIMING_IB_DIR:path.join(d,'keys'),LIMING_BIN_DIR:path.join(d,'usr-bin'),
-    LIMING_SKILL_DIR:path.join(d,'skills/liming-cloud-computers'),LIMING_OLD_CLOUD_PLUGIN_DIR:path.join(d,'old-cloud-plugin'),LIMING_OLD_CLOUD_DIR:path.join(d,'old-cloud'),
+    LIMING_OLD_CLOUD_PLUGIN_DIR:path.join(d,'old-cloud-plugin'),LIMING_OLD_CLOUD_DIR:path.join(d,'old-cloud'),
     LIMING_INSTABOX:path.join(bin,'instabox'),LIMING_NPM:path.join(bin,'npm'),LIMING_DSH:path.join(bin,'dsh'),LIMING_APT:path.join(bin,'apt-get'),
     LIMING_TTY:path.join(d,'tty'),LIMING_ZIP_SIZE:z.size,LIMING_ZIP_SHA256:z.sha};
   const run=(...args)=>spawnSync('bash',[setup,...args],{env,encoding:'utf8',input:''});
@@ -110,7 +120,57 @@ test('安装包大小或哈希不对就不装，已有的 current 原样不动',
   assert.equal(lib('verify_zip "$1"',zip).status,0,'对的安装包能过');
 });
 
-test('整套装一遍：两把 key 存好、网关经 InstaBox 从 li2 取、ib 和技能装上、两台云电脑准备好，输出里没有 key',t=>{
+test('装机不再下载 dsh-task、dsh-tablet 和 dsh-tablet-profile.yml',t=>{
+  const {run,read}=rig(t);
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  const downloads=read('curl.log');
+  assert.ok(downloads.includes('file://'),'记录到了 file:// 下载');
+  for(const old of ['dsh-task.sh','dsh-tablet.sh','dsh-tablet-profile.yml']){
+    assert.ok(!downloads.includes(old),'不该再下载 '+old);
+  }
+});
+
+test('云端准备不再碰 Codex、Harness、网关 key 和小芯的服务',t=>{
+  const {d,run}=rig(t);
+  const origCodex='model_provider = "orig"\n';
+  const origProfile='# 原有 profile\n';
+  const origGwKey='orig-gateway-key\n';
+  const origDshPatch='# 原有 dsh 补丁\n';
+  for(const m of ['li2','li']){
+    const h=path.join(d,'home-'+m);
+    fs.mkdirSync(path.join(h,'.codex'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.codex/config.toml'),origCodex,{mode:0o600});
+    fs.mkdirSync(path.join(h,'.dsh/profiles/web'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.dsh/profiles/web/cordis.patch.yml'),origDshPatch);
+    fs.writeFileSync(path.join(h,'.profile'),origProfile);
+    fs.mkdirSync(path.join(h,'.config/liming'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.config/liming/gateway.key'),origGwKey,{mode:0o600});
+    fs.mkdirSync(path.join(h,'.xin'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.xin/harness.key'),'remote-harness-key\n',{mode:0o600});
+    fs.writeFileSync(path.join(h,'.xin/codex.key'),'remote-codex-key\n',{mode:0o600});
+    fs.writeFileSync(path.join(h,'.local/bin/dsh'),'#!/bin/sh\necho "$*" >> "$HOME/dsh.log"\n',{mode:0o755});
+    fs.writeFileSync(path.join(h,'bin/codex'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+    fs.mkdirSync(path.join(h,'.config/systemd/user'),{recursive:true});
+    fs.writeFileSync(path.join(h,'.config/systemd/user/xin-kernel-resident.service'),'[Unit]\n');
+    fs.writeFileSync(path.join(h,'.config/systemd/user/xin-reaper.timer'),'[Unit]\n');
+    fs.writeFileSync(path.join(h,'bin/systemctl'),'#!/bin/sh\necho "systemctl $*" >> "$HOME/systemctl.log"\n',{mode:0o755});
+  }
+  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
+  for(const m of ['li2','li']){
+    const h=path.join(d,'home-'+m);
+    assert.equal(fs.readFileSync(path.join(h,'.codex/config.toml'),'utf8'),origCodex,m+' .codex/config.toml 不应变动');
+    assert.equal(fs.readFileSync(path.join(h,'.dsh/profiles/web/cordis.patch.yml'),'utf8'),origDshPatch,m+' .dsh/ 不应变动');
+    assert.ok(!fs.existsSync(path.join(h,'.dsh/profiles/tablet')),m+' 不应建 tablet 配置');
+    assert.equal(fs.readFileSync(path.join(h,'.profile'),'utf8'),origProfile,m+' .profile 不应变动');
+    assert.equal(fs.readFileSync(path.join(h,'.config/liming/gateway.key'),'utf8'),origGwKey,m+' gateway.key 不应变动');
+    assert.ok(!fs.existsSync(path.join(h,'dsh.log')),m+' 不应调远端 dsh');
+    assert.ok(!fs.existsSync(path.join(h,'systemctl.log')),m+' 不应调 systemctl');
+  }
+  assert.doesNotMatch(r.stdout,/Codex|Harness|手动切主机|小芯/);
+  noSecrets(r);
+});
+
+test('整套装一遍：两把 key 存好、网关经 InstaBox 从 li2 取、ib 装上、两台云电脑准备好，输出里没有 key',t=>{
   const {d,env,run,read,ibLog}=rig(t);
   const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
   // key：目录 700、文件 600，各自账号的那把
@@ -121,90 +181,29 @@ test('整套装一遍：两把 key 存好、网关经 InstaBox 从 li2 取、ib 
   assert.ok(ibLog().some(l=>l.startsWith('li2 pull li2 '+REMOTE_ZIP+' ')));
   assert.ok(fs.existsSync(path.join(env.LIMING_GW_DIR,'current/wb_proxy.py')));
   assert.equal(read('dsh.log'),'plugin --profile web add '+env.LIMING_PLUGIN_DIR+'\n');
-  // ib 和技能
+  // ib
   assert.equal(fs.readFileSync(path.join(env.LIMING_BIN_DIR,'ib'),'utf8'),fs.readFileSync(path.join(tablet,'ib.sh'),'utf8'));
   assert.equal(mode(path.join(env.LIMING_BIN_DIR,'ib')),0o755);
-  assert.equal(fs.readFileSync(path.join(env.LIMING_SKILL_DIR,'SKILL.md'),'utf8'),fs.readFileSync(path.join(tablet,'skills/liming-cloud-computers/SKILL.md'),'utf8'));
   // 两台云电脑：经 exec --stdin 跑准备脚本
   for(const m of ['li2','li'])assert.ok(ibLog().some(l=>l.startsWith(m+' exec '+m+' --stdin')&&l.endsWith('-- bash -s')),m);
   for(const m of ['li2','li']){
     const h=path.join(d,'home-'+m);
-    assert.equal(fs.readFileSync(path.join(h,'.local/bin/dsh-tablet'),'utf8'),fs.readFileSync(path.join(tablet,'dsh-tablet.sh'),'utf8'),m+' 手动切主机用的包装脚本照旧');
-    assert.equal(fs.readFileSync(path.join(h,'.dsh/profiles/web/cordis.patch.yml'),'utf8'),fs.readFileSync(path.join(tablet,'dsh-tablet-profile.yml'),'utf8'));
-    // 平板 AI 交给 Harness 的任务：单独的 tablet 配置（Harness 自带的 headless 模板 + 网关线路）和 dsh-task
-    assert.match(fs.readFileSync(path.join(h,'dsh.log'),'utf8'),/^--profile tablet --from-default-profile headless --dump-config$/m,m);
-    assert.equal(fs.readFileSync(path.join(h,'.dsh/profiles/tablet/cordis.patch.yml'),'utf8'),fs.readFileSync(path.join(tablet,'dsh-tablet-profile.yml'),'utf8'),m);
-    assert.equal(fs.readFileSync(path.join(h,'.local/bin/dsh-task'),'utf8'),fs.readFileSync(path.join(tablet,'dsh-task.sh'),'utf8'),m);
-    assert.equal(mode(path.join(h,'.local/bin/dsh-task')),0o700,m);
-    assert.equal(mode(path.join(h,'.config/liming/gateway.key')),0o600);
-    assert.match(fs.readFileSync(path.join(h,'.profile'),'utf8'),/export LIMING_GATEWAY_KEY=/);
     const log=fs.readFileSync(path.join(h,'remote.log'),'utf8');
     assert.match(log,/npm i -g @playwright\/cli@0\.1\.25/);assert.match(log,/playwright-cli install-browser chromium/);
   }
-  assert.equal(fs.readFileSync(path.join(d,'home-li/.config/liming/gateway.key'),'utf8'),'remote-codex-key\n','li 有 Codex 专用的 key 就用它');
-  assert.equal(fs.readFileSync(path.join(d,'home-li2/.config/liming/gateway.key'),'utf8'),'remote-harness-key\n','没有就用 harness.key');
-  assert.match(r.stdout,/li2：.*准备好了/);assert.match(r.stdout,/li：.*准备好了/);
+  assert.match(r.stdout,/li2：准备好了/);assert.match(r.stdout,/li：准备好了/);
   noSecrets(r);
 });
 
-test('云端：Codex 已有本机网关线路就只补 env_key（先备份）；没有线路就补一整段并设成默认；已经配好就不动',t=>{
-  const {d,run}=rig(t);
-  assert.equal(run().status,0);
-  const li=fs.readFileSync(path.join(d,'home-li/.codex/config.toml'),'utf8');
-  assert.match(li,/\[model_providers\.workbuddy\]\nenv_key = "LIMING_GATEWAY_KEY"\n/);
-  assert.ok(li.includes('[mcp_servers.rea]\ncommand = "/x/rea.mjs"\n'),'别的配置原样保留');
-  assert.equal(li.replace('env_key = "LIMING_GATEWAY_KEY"\n',''),LI_CODEX,'只多这一行');
-  assert.equal(fs.readdirSync(path.join(d,'home-li/.codex')).filter(f=>f.startsWith('config.toml.bak-liming')).length,1);
-  const li2=fs.readFileSync(path.join(d,'home-li2/.codex/config.toml'),'utf8');
-  assert.match(li2,/^model_provider = "workbuddy"\nmodel = "deepseek-v4\.1-flash"\n/);
-  assert.match(li2,/\[model_providers\.workbuddy\]\nname = .*\nbase_url = "http:\/\/127\.0\.0\.1:8788\/v1"\nwire_api = "responses"\nenv_key = "LIMING_GATEWAY_KEY"\n/);
-  assert.equal(mode(path.join(d,'home-li2/.codex/config.toml')),0o600);
-  // 再跑一次：都不动、不多备份、.profile 不重复加
-  const before={li:fs.readFileSync(path.join(d,'home-li/.codex/config.toml'),'utf8'),li2};
-  const r=run('--skip-li');assert.equal(r.status,0,r.stdout+r.stderr);
-  assert.equal(fs.readFileSync(path.join(d,'home-li2/.codex/config.toml'),'utf8'),before.li2);
-  assert.equal(fs.readFileSync(path.join(d,'home-li2/.profile'),'utf8').match(/LIMING_GATEWAY_KEY=/g).length,1);
-});
-
-test('云端：顶层已经指定了别的模型线路就不改默认，只补上网关线路并说明',t=>{
-  const {d,lib}=rig(t);
-  const h=remoteHome(d,'li9',{codexConfig:'model_provider = "openai"\nmodel = "gpt-x"\n'});
-  const script=lib('remote_script li9 "$1" "$2" "$3"',path.join(tablet,'dsh-tablet.sh'),path.join(tablet,'dsh-task.sh'),path.join(tablet,'dsh-tablet-profile.yml'));
-  assert.equal(script.status,0,script.stderr);
-  const r=spawnSync('bash',['-s'],{input:script.stdout,encoding:'utf8',env:{PATH:path.join(h,'bin')+':'+process.env.PATH,HOME:h,LIMING_REMOTE_WS:path.join(d,'ws-li9')}});
-  assert.equal(r.status,0,r.stderr);
-  assert.equal(r.stderr,'','准备脚本运行时不该有 bash 警告（比如 here-document 没写在命令替换里面）');
-  const cfg=fs.readFileSync(path.join(h,'.codex/config.toml'),'utf8');
-  assert.match(cfg,/^model_provider = "openai"\nmodel = "gpt-x"\n/);
-  assert.match(cfg,/\[model_providers\.workbuddy\][\s\S]*env_key = "LIMING_GATEWAY_KEY"/);
-  assert.match(r.stdout,/^LMC codex provider-added-not-default$/m);
-});
-
-test('云端：没装 Codex 就不建它的配置；没有网关 key 照样装浏览器，并报出来',t=>{
-  const {d,lib}=rig(t);
-  const h=remoteHome(d,'li8',{codex:false});fs.rmSync(path.join(h,'.xin'),{recursive:true});
-  const script=lib('remote_script li8 "$1" "$2" "$3"',path.join(tablet,'dsh-tablet.sh'),path.join(tablet,'dsh-task.sh'),path.join(tablet,'dsh-tablet-profile.yml'));
-  const r=spawnSync('bash',['-s'],{input:script.stdout,encoding:'utf8',env:{PATH:path.join(h,'bin')+':'+process.env.PATH,HOME:h,LIMING_REMOTE_WS:path.join(d,'ws-li8')}});
-  assert.equal(r.status,0,r.stderr);
-  assert.equal(r.stderr,'');
-  assert.match(r.stdout,/^LMC gateway-key missing$/m);assert.match(r.stdout,/^LMC codex none$/m);assert.match(r.stdout,/^LMC browser ok$/m);
-  assert.ok(!fs.existsSync(path.join(h,'.codex')));
-  assert.match(r.stdout,/^LMC done$/m);
-});
-
-test('清掉旧的云端任务插件：平板上卸载 liming-cloud、删掉旧的令牌和台账；云电脑上卸载 liming-lease、删掉写 key',t=>{
-  const {d,env,run,read}=rig(t);
+test('清掉平板上旧的云端任务插件：卸载 liming-cloud、删掉旧的令牌和台账',t=>{
+  const {env,run,read}=rig(t);
   fs.mkdirSync(path.join(env.LIMING_OLD_CLOUD_PLUGIN_DIR,'lib'),{recursive:true});fs.writeFileSync(path.join(env.LIMING_OLD_CLOUD_PLUGIN_DIR,'package.json'),'{}');
   fs.mkdirSync(env.LIMING_OLD_CLOUD_DIR);fs.writeFileSync(path.join(env.LIMING_OLD_CLOUD_DIR,'secrets.json'),'{"machines":{"li2":{"sshTarget":"ibssh_old-token@x"}}}');
-  for(const m of ['li2','li']){const h=path.join(d,'home-'+m);fs.mkdirSync(path.join(h,'.liming-lease/lib'),{recursive:true});fs.mkdirSync(path.join(h,'.liming-cloud'));fs.writeFileSync(path.join(h,'.liming-cloud/lease.key'),'old-write-key\n');}
   const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
   assert.ok(!fs.existsSync(env.LIMING_OLD_CLOUD_PLUGIN_DIR));assert.ok(!fs.existsSync(env.LIMING_OLD_CLOUD_DIR));
   assert.ok(read('dsh.log').includes('plugin --profile web remove liming-cloud\n'));
-  for(const m of ['li2','li']){const h=path.join(d,'home-'+m);
-    assert.ok(!fs.existsSync(path.join(h,'.liming-lease')));assert.ok(!fs.existsSync(path.join(h,'.liming-cloud')));
-    assert.ok(fs.readFileSync(path.join(h,'dsh.log'),'utf8').includes('plugin --profile web remove liming-lease'));}
   assert.match(r.stdout,/旧的云端任务插件已删掉/);
-  noSecrets(r,['ibssh_old-token','old-write-key']);
+  noSecrets(r,['ibssh_old-token']);
 });
 
 test('key 填反了（li 的填给 li2）：说清楚看不到 li2、不存，再问一次；三次都不对就不接这台',t=>{
@@ -230,8 +229,6 @@ test('重复跑：直接回车保留原来的 key；不再下载安装包、不�
   assert.equal(ibLog().filter(l=>/ pull /.test(l)).length,pulls);
   assert.equal(fs.readFileSync(path.join(env.LIMING_GW_DIR,'accounts/acct.json'),'utf8'),'{"keep":true}');
   assert.equal(read('dsh.log').split('\n').filter(Boolean).length,1,'网关插件只挂一次');
-  // 云电脑上的 web 配置：内容没变就不再备份（以前靠配置开头的一句说明认自己的文件，说明改了以后每次重跑都多一份备份）
-  for(const m of ['li2','li'])assert.deepEqual(fs.readdirSync(path.join(d,'home-'+m,'.dsh/profiles/web')).filter(f=>f.includes('.bak')),[],m);
 });
 
 test('li2 上没有安装包就从 li 取',t=>{
@@ -247,21 +244,14 @@ test('一台在冷却（exec 被拒）：说明是哪台、稍后重跑；平板
   assert.match(r.stdout+r.stderr,/li：.*没准备好.*稍后/);
   assert.match(r.stdout,/li2：.*准备好了/);
   assert.ok(fs.existsSync(path.join(env.LIMING_BIN_DIR,'ib')));
-  assert.ok(!fs.existsSync(path.join(d,'home-li/.config/liming/gateway.key')));
-});
-
-test('远端 web 配置里已有别的补丁时先备份再换，内容不丢',t=>{
-  const {d,run}=rig(t),prof=path.join(d,'home-li2/.dsh/profiles/web');
-  fs.mkdirSync(prof,{recursive:true});fs.writeFileSync(path.join(prof,'cordis.patch.yml'),'# 站长自己的\n- id: something\n');
-  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
-  const baks=fs.readdirSync(prof).filter(f=>f.startsWith('cordis.patch.yml.bak'));
-  assert.equal(baks.length,1);assert.equal(fs.readFileSync(path.join(prof,baks[0]),'utf8'),'# 站长自己的\n- id: something\n');
+  assert.ok(!fs.existsSync(path.join(d,'home-li/remote.log')));
 });
 
 test('--dry-run 只列步骤，什么都不改、什么命令都不跑',t=>{
   const {d,env,run}=rig(t);const before=fs.readdirSync(d).sort();
   const r=run('--dry-run');assert.equal(r.status,0,r.stderr);
-  assert.match(r.stdout,/key/);assert.match(r.stdout,/ib/);assert.match(r.stdout,/技能/);
+  assert.match(r.stdout,/key/);assert.match(r.stdout,/ib/);
+  assert.doesNotMatch(r.stdout,/Codex|Harness|dsh-task|dsh-tablet|小芯/);
   assert.deepEqual(fs.readdirSync(d).sort(),before);
   assert.ok(!fs.existsSync(env.LIMING_GW_DIR));assert.ok(!fs.existsSync(env.LIMING_IB_DIR));
 });
@@ -271,7 +261,7 @@ test('--skip-li 只问 li2 的 key，不碰 li',t=>{
   const r=run('--skip-li');assert.equal(r.status,0,r.stdout+r.stderr);
   assert.equal(r.stderr.match(/InstaBox key/g)?.length,1);
   assert.ok(!ibLog().some(l=>/ (get|exec|pull) li( |$)/.test(l)));
-  assert.ok(!fs.existsSync(path.join(d,'home-li/.config/liming')));
+  assert.ok(!fs.existsSync(path.join(d,'home-li/remote.log')));
 });
 
 test('一把 key 都没有：停下并说明去哪建 key',t=>{
@@ -289,50 +279,6 @@ test('没装 InstaBox 命令行：用 npm 装指定版本；装完还找不到�
   assert.match(r.stderr,/PATH/);
   const ok=spawnSync('bash',['-c','source "$0"; ensure_instabox',setup],{env:{...env,LIMING_SETUP_LIB:'1'},encoding:'utf8'});
   assert.equal(ok.status,0,ok.stderr);
-});
-
-test('云端：小芯、天启已停用——它们的用户级常驻服务（xin-kernel-resident、xin-reaper）关掉并停下，文件不删；没有就不动',t=>{
-  const {d,lib}=rig(t);
-  const h=remoteHome(d,'li7',{codexConfig:LI_CODEX});
-  const units=path.join(h,'.config/systemd/user');fs.mkdirSync(units,{recursive:true});
-  for(const u of ['xin-kernel-resident.service','xin-reaper.timer','xin-reaper.service'])fs.writeFileSync(path.join(units,u),'[Unit]\n');
-  fs.writeFileSync(path.join(h,'bin/systemctl'),'#!/bin/sh\necho "systemctl $*" >> "$HOME/remote.log"\n',{mode:0o755});
-  const script=lib('remote_script li7 "$1" "$2" "$3"',path.join(tablet,'dsh-tablet.sh'),path.join(tablet,'dsh-task.sh'),path.join(tablet,'dsh-tablet-profile.yml'));
-  const run=()=>spawnSync('bash',['-s'],{input:script.stdout,encoding:'utf8',env:{PATH:path.join(h,'bin')+':'+process.env.PATH,HOME:h,LIMING_REMOTE_WS:path.join(d,'ws-li7')}});
-  const r=run();assert.equal(r.status,0,r.stderr);assert.equal(r.stderr,'');
-  const log=fs.readFileSync(path.join(h,'remote.log'),'utf8');
-  assert.match(log,/^systemctl --user disable --now xin-kernel-resident\.service$/m,'逐个关：缺一个不影响另一个');
-  assert.match(log,/^systemctl --user disable --now xin-reaper\.timer$/m);
-  assert.match(log,/^systemctl --user stop xin-reaper\.service$/m);
-  assert.match(r.stdout,/^LMC xin-services stopped$/m);
-  for(const u of ['xin-kernel-resident.service','xin-reaper.timer'])assert.ok(fs.existsSync(path.join(units,u)),u+' 文件留着，想恢复能再开');
-  // 没有这些服务的机器：不调 systemctl
-  const h2=remoteHome(d,'li6');fs.writeFileSync(path.join(h2,'bin/systemctl'),'#!/bin/sh\necho "systemctl $*" >> "$HOME/remote.log"\n',{mode:0o755});
-  const r2=spawnSync('bash',['-s'],{input:lib('remote_script li6 "$1" "$2" "$3"',path.join(tablet,'dsh-tablet.sh'),path.join(tablet,'dsh-task.sh'),path.join(tablet,'dsh-tablet-profile.yml')).stdout,encoding:'utf8',env:{PATH:path.join(h2,'bin')+':'+process.env.PATH,HOME:h2,LIMING_REMOTE_WS:path.join(d,'ws-li6')}});
-  assert.equal(r2.status,0,r2.stderr);assert.match(r2.stdout,/^LMC xin-services none$/m);
-  assert.doesNotMatch(fs.readFileSync(path.join(h2,'remote.log'),'utf8'),/systemctl/);
-});
-
-test('装机结果里说明哪台停了小芯、天启的后台服务',t=>{
-  const {d,run}=rig(t);
-  const units=path.join(d,'home-li2/.config/systemd/user');fs.mkdirSync(units,{recursive:true});
-  fs.writeFileSync(path.join(units,'xin-reaper.timer'),'[Unit]\n');
-  fs.writeFileSync(path.join(d,'home-li2/bin/systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o755});
-  const r=run();assert.equal(r.status,0,r.stdout+r.stderr);
-  assert.match(r.stdout,/li2：准备好了.*停了小芯、天启的后台服务/);
-  assert.doesNotMatch(r.stdout,/li：准备好了.*停了小芯/);
-});
-
-test('云端：tablet 配置只在第一次从模板建，重跑不重建；配置里原有的自定义先备份再换成网关线路',t=>{
-  const {d,run}=rig(t);
-  assert.equal(run().status,0);
-  const tp=path.join(d,'home-li2/.dsh/profiles/tablet');
-  fs.writeFileSync(path.join(tp,'cordis.patch.yml'),'# 站长自己改的\n');
-  const r=run('--skip-li');assert.equal(r.status,0,r.stdout+r.stderr);
-  assert.equal(fs.readFileSync(path.join(d,'home-li2/dsh.log'),'utf8').match(/--from-default-profile/g).length,1,'只建一次');
-  const baks=fs.readdirSync(tp).filter(f=>f.startsWith('cordis.patch.yml.bak'));
-  assert.equal(baks.length,1);assert.equal(fs.readFileSync(path.join(tp,baks[0]),'utf8'),'# 站长自己改的\n');
-  assert.equal(fs.readFileSync(path.join(tp,'cordis.patch.yml'),'utf8'),fs.readFileSync(path.join(tablet,'dsh-tablet-profile.yml'),'utf8'));
 });
 
 test('装机结果里说明哪台的 Antigravity 还没登录、哪台没装',t=>{

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Liming 平板装机：在 DSH Go 的终端里（打开一个对话 → 全部功能 → 终端）运行
 #   apt-get update && apt-get install -y curl && curl -fsSL https://tablet.liming-work.com/setup.sh | bash
-# 装好随本机引擎启停的 WorkBuddy 网关和插件；再让平板上的 AI 能自己操作两台云电脑 li、li2：
+# 装好随本机引擎启停的 WorkBuddy 网关和插件；再让平板上的 AI 能操作两台云电脑 li、li2：
 # 装 InstaBox 命令行和 ib（按机器选账号的 key），存两把 key（li2、li 所在账号各一把，只要 machines:read 和 machines:write），
-# 装技能「云电脑」；在 li2、li 上给 Codex 接好本机网关、装好浏览器命令行，清掉以前的云端任务插件。
+# 在 li2、li 上装好浏览器命令行、检查 Antigravity 登录状态。
 # 脚本里不含任何密钥；key 只存平板 ~/.config/liming/instabox/（权限 600），只经环境变量交给 instabox。可以重复运行。
 #   --dry-run  只列出要做的事    --skip-li  不接 li
-# 说明：https://github.com/yux91803-hobo/tablet-setup 的 README；设计见 liming-work-site 仓库 docs/superpowers/specs/2026-11-26-tablet-cloud-direct-design.md
+# 说明：https://github.com/yux91803-hobo/tablet-setup 的 README；设计见 docs/superpowers/specs/2026-11-27-crew-design.md
 set +x
 set -euo pipefail
 
@@ -16,7 +16,6 @@ GW_DIR=${LIMING_GW_DIR:-/root/workbuddy-gateway}
 PLUGIN_DIR=${LIMING_PLUGIN_DIR:-/root/liming-gateway}
 KEY_DIR=${LIMING_IB_DIR:-$HOME_DIR/.config/liming/instabox}
 BIN_DIR=${LIMING_BIN_DIR:-/usr/local/bin}
-SKILL_DIR=${LIMING_SKILL_DIR:-${DSH_HOME:-$HOME_DIR/.dsh}/skills/liming-cloud-computers}
 OLD_CLOUD_PLUGIN_DIR=${LIMING_OLD_CLOUD_PLUGIN_DIR:-/root/liming-cloud}
 OLD_CLOUD_DIR=${LIMING_OLD_CLOUD_DIR:-$HOME_DIR/.liming-cloud}
 INSTABOX=${LIMING_INSTABOX:-instabox}
@@ -188,169 +187,21 @@ cleanup_old_tablet() {
 install_tools() {
   mkdir -p "$BIN_DIR"
   cp -f "$WORK/ib.sh" "$BIN_DIR/ib.tmp"; chmod 755 "$BIN_DIR/ib.tmp"; mv -f "$BIN_DIR/ib.tmp" "$BIN_DIR/ib"
-  mkdir -p "$SKILL_DIR"
-  cp -f "$WORK/SKILL.md" "$SKILL_DIR/SKILL.md.tmp"; mv -f "$SKILL_DIR/SKILL.md.tmp" "$SKILL_DIR/SKILL.md"
 }
 
 # 在云电脑上跑的准备脚本（经 instabox exec --stdin 送过去）。每一项各自报一行「LMC 项 结果」，一项失败不影响别的项。
-# 只动这些：以前的租约插件（删）、~/.config/liming、~/.profile 里的一行导出、Codex 配置里的本机网关线路（先备份）、
-# 浏览器命令行、Harness 的 web 和 tablet 配置补丁（先备份）、dsh-tablet 和 dsh-task 两个包装脚本。
-# 小芯、天启的文件不碰（它们的常驻服务关掉、不删）。Antigravity 只看装没装、登没登录。
+# 只装浏览器命令行，以及检查 Antigravity 装没装、登没登录。不碰账号和令牌。
 remote_script() {
-  local machine=$1 wrapper=$2 task=$3 profile=$4
+  local machine=$1
   printf 'set +x\nLIMING_MACHINE=%q\nPLAYWRIGHT_CLI_VERSION=%q\n' "$machine" "$PLAYWRIGHT_CLI_VERSION"
-  cat <<'HEAD'
+  cat <<'END'
 set -u
 umask 077
 st() { printf 'LMC %s %s\n' "$1" "$2"; }
-# 换配置补丁：原来有、内容又不一样才备份
-put_patch() {
-  if [ -s "$1" ] && ! cmp -s "$1" "$2"; then mv -f "$1" "$1.bak.$(date +%Y%m%d%H%M%S)"; fi
-  mv -f "$2" "$1"
-}
-# 0. 小芯、天启已停用（站长 2026-11-26）：关掉并停下它们的用户级常驻服务。文件不删，想恢复用 systemctl --user enable --now
-XU="$HOME/.config/systemd/user"
-if [ -f "$XU/xin-kernel-resident.service" ] || [ -f "$XU/xin-reaper.timer" ]; then
-  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  for u in xin-kernel-resident.service xin-reaper.timer; do
-    if [ -f "$XU/$u" ]; then systemctl --user disable --now "$u" </dev/null >/dev/null 2>&1 || true; fi
-  done
-  systemctl --user stop xin-reaper.service </dev/null >/dev/null 2>&1 || true
-  st xin-services stopped
-else
-  st xin-services none
-fi
-# 1. 以前的租约插件（liming-lease）和它的写 key
-if [ -d "$HOME/.liming-lease" ] || [ -d "$HOME/.liming-cloud" ]; then
-  if [ -x "$HOME/.local/bin/dsh" ]; then "$HOME/.local/bin/dsh" plugin --profile web remove liming-lease </dev/null >/dev/null 2>&1 || true; fi
-  rm -rf "$HOME/.liming-lease" "$HOME/.liming-cloud"
-  st old-lease removed
-else
-  st old-lease none
-fi
-# 2. 本机网关的 key：复制一份到 ~/.config/liming，登录 shell 导出给 Codex 等代理
-mkdir -p "$HOME/.config/liming" && chmod 700 "$HOME/.config/liming"
-GK="$HOME/.config/liming/gateway.key"
-if [ ! -s "$GK" ]; then
-  for src in "$HOME/.xin/codex.key" "$HOME/.xin/harness.key"; do
-    if [ -s "$src" ]; then cp "$src" "$GK.tmp" && chmod 600 "$GK.tmp" && mv -f "$GK.tmp" "$GK"; break; fi
-  done
-fi
-if [ -s "$GK" ]; then
-  if ! grep -q 'LIMING_GATEWAY_KEY=' "$HOME/.profile" 2>/dev/null; then
-    printf '\n# liming：本机网关的 key（给 Codex 等代理用，平板装机脚本加的）\n[ -r "$HOME/.config/liming/gateway.key" ] && export LIMING_GATEWAY_KEY="$(cat "$HOME/.config/liming/gateway.key")"\n' >> "$HOME/.profile"
-  fi
-  st gateway-key ok
-else
-  st gateway-key missing
-fi
-# 3. Codex 走本机网关：已有 workbuddy 线路就补 env_key，没有就补一整段（顶层没指定别的线路才设成默认）；改之前备份
-if command -v codex >/dev/null 2>&1; then
-  r=$(python3 - 2>&1 <<'PY'
-import os, re, sys, time
-p = os.path.expanduser('~/.codex/config.toml')
-BLOCK = ('[model_providers.workbuddy]\n'
-         'name = "WorkBuddy（本机网关）"\n'
-         'base_url = "http://127.0.0.1:8788/v1"\n'
-         'wire_api = "responses"\n'
-         'env_key = "LIMING_GATEWAY_KEY"\n')
-HEADER = re.compile(r'^\s*\[model_providers\.workbuddy\]\s*(#.*)?$')
-TABLE = re.compile(r'^\s*\[')
-def write(text):
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    if os.path.exists(p):
-        bak = p + '.bak-liming-' + time.strftime('%Y%m%d')
-        if not os.path.exists(bak):
-            with open(p, 'rb') as a, open(bak, 'wb') as b:
-                b.write(a.read())
-            os.chmod(bak, 0o600)
-    tmp = p + '.tmp-liming'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, p)
-try:
-    s = open(p, encoding='utf-8').read()
-except FileNotFoundError:
-    write('model_provider = "workbuddy"\nmodel = "deepseek-v4.1-flash"\n\n' + BLOCK)
-    print('created')
-    sys.exit(0)
-lines = s.splitlines(keepends=True)
-idx = next((i for i, l in enumerate(lines) if HEADER.match(l.rstrip('\n'))), None)
-if idx is not None:
-    j = idx + 1
-    while j < len(lines) and not TABLE.match(lines[j]):
-        j += 1
-    if any(re.match(r'\s*env_key\s*=', l) for l in lines[idx + 1:j]):
-        print('unchanged')
-        sys.exit(0)
-    lines.insert(idx + 1, 'env_key = "LIMING_GATEWAY_KEY"\n')
-    write(''.join(lines))
-    print('env-key-added')
-    sys.exit(0)
-first = next((i for i, l in enumerate(lines) if TABLE.match(l)), len(lines))
-top = lines[:first]
-has_provider = any(re.match(r'\s*model_provider\s*=', l) for l in top)
-has_model = any(re.match(r'\s*model\s*=', l) for l in top)
-pre = []
-if not has_provider:
-    pre.append('model_provider = "workbuddy"\n')
-    if not has_model:
-        pre.append('model = "deepseek-v4.1-flash"\n')
-body = ''.join(pre + lines)
-if body and not body.endswith('\n'):
-    body += '\n'
-write(body + '\n' + BLOCK)
-print('provider-added-not-default' if has_provider else 'provider-added')
-PY
-) || r=failed
-  st codex "$(printf '%s' "$r" | tail -n 1)"
-else
-  st codex none
-fi
-# 4. 浏览器命令行（Playwright CLI）和它的 Chromium
+# 1. 浏览器命令行（Playwright CLI）和它的 Chromium
 if ! command -v playwright-cli >/dev/null 2>&1; then npm i -g "@playwright/cli@$PLAYWRIGHT_CLI_VERSION" </dev/null >/dev/null 2>&1 || true; fi
 if command -v playwright-cli >/dev/null 2>&1 && playwright-cli install-browser chromium </dev/null >/dev/null 2>&1; then st browser ok; else st browser failed; fi
-# 5. Harness：手动切主机（调试用）的 web 配置补丁和 dsh-tablet；平板 AI 交任务用的 tablet 配置和 dsh-task
-if [ -x "$HOME/.local/bin/dsh" ] && [ -s "$HOME/.xin/harness.key" ]; then
-  WS=${LIMING_REMOTE_WS:-/data/workspace/tablet}
-  mkdir -p "$HOME/.local/bin" "$HOME/.dsh/profiles/web" "$WS"
-  cat > "$HOME/.local/bin/dsh-tablet.tmp" <<'LIMING_WRAPPER_EOF'
-HEAD
-  cat "$wrapper"
-  cat <<'MID'
-LIMING_WRAPPER_EOF
-  chmod 700 "$HOME/.local/bin/dsh-tablet.tmp"
-  mv -f "$HOME/.local/bin/dsh-tablet.tmp" "$HOME/.local/bin/dsh-tablet"
-  P="$HOME/.dsh/profiles/web/cordis.patch.yml"
-  cat > "$P.new" <<'LIMING_PROFILE_EOF'
-MID
-  cat "$profile"
-  cat <<'TAIL'
-LIMING_PROFILE_EOF
-  put_patch "$P" "$P.new"
-  st host-switch "$HOME/.local/bin/dsh-tablet $WS"
-  # tablet 配置：第一次从 Harness 自带的 headless 模板建（不带天启的人设和插件），补丁和 web 的一样（网关线路和默认模型）
-  TP="$HOME/.dsh/profiles/tablet"
-  if [ ! -f "$TP/cordis.yml" ]; then "$HOME/.local/bin/dsh" --profile tablet --from-default-profile headless --dump-config </dev/null >/dev/null 2>&1 || true; fi
-  if [ -f "$TP/cordis.yml" ] && cp "$P" "$TP/cordis.patch.yml.new"; then
-    put_patch "$TP/cordis.patch.yml" "$TP/cordis.patch.yml.new"
-    cat > "$HOME/.local/bin/dsh-task.tmp" <<'LIMING_TASK_EOF'
-TAIL
-  cat "$task"
-  cat <<'END'
-LIMING_TASK_EOF
-    chmod 700 "$HOME/.local/bin/dsh-task.tmp"
-    mv -f "$HOME/.local/bin/dsh-task.tmp" "$HOME/.local/bin/dsh-task"
-    st harness ok
-  else
-    st harness failed
-  fi
-else
-  st host-switch skipped
-  st harness none
-fi
-# 6. Antigravity（两台都用）：只看装没装、登没登录；账号由站长自己在那台上登
+# 2. Antigravity（两台都用）：只看装没装、登没登录；账号由站长自己在那台上登
 if [ -x "$HOME/.local/bin/agy" ] || command -v agy >/dev/null 2>&1; then
   if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then st antigravity ok; else st antigravity logged-out; fi
 else
@@ -363,7 +214,7 @@ END
 # 在一台上跑准备脚本，输出「准备好了…」或「没准备好…」一句（不中断整个装机）。
 remote_setup() {
   local m=$1 out val notes=''
-  if ! out=$(remote_script "$m" "$WORK/dsh-tablet.sh" "$WORK/dsh-task.sh" "$WORK/dsh-tablet-profile.yml" | ibx "$m" exec "$m" --stdin --timeout 600 -- bash -s 2>&1) \
+  if ! out=$(remote_script "$m" | ibx "$m" exec "$m" --stdin --timeout 600 -- bash -s 2>&1) \
      || ! printf '%s\n' "$out" | grep -q '^LMC done$'; then
     case "$out" in
       *cool*) val='在冷却';;
@@ -374,26 +225,12 @@ remote_setup() {
     return 0
   fi
   lmc() { printf '%s\n' "$out" | sed -n "s/^LMC $1 //p" | tail -n 1; }
-  [ "$(lmc old-lease)" = removed ] && OLD_REMOVED=1
-  [ "$(lmc xin-services)" = stopped ] && notes="$notes；停了小芯、天启的后台服务（文件没删）"
-  [ "$(lmc gateway-key)" = missing ] && notes="$notes；没找到本机网关的 key，云上的 Codex 用不了模型"
-  case "$(lmc codex)" in
-    none) notes="$notes；没装 Codex";;
-    failed) notes="$notes；Codex 的配置没改成（看 ~/.codex/config.toml）";;
-    provider-added-not-default) notes="$notes；Codex 原来指定了别的默认线路，没改，用本机网关要加 -c model_provider=workbuddy";;
-  esac
   [ "$(lmc browser)" = ok ] || notes="$notes；浏览器命令行没装好，稍后重跑"
-  case "$(lmc harness)" in
-    none) notes="$notes；没有 Harness（或没有它的网关 key）";;
-    failed) notes="$notes；Harness 的 tablet 配置没建成，稍后重跑";;
-  esac
   case "$(lmc antigravity)" in
     logged-out) notes="$notes；Antigravity 还没登录";;
     none) notes="$notes；没装 Antigravity";;
   esac
-  val=$(lmc host-switch)
   printf '%s：准备好了%s\n' "$m" "$notes"
-  if [ -n "$val" ] && [ "$val" != skipped ]; then printf '  手动切主机（调试用）的启动命令：%s，工作目录 %s\n' "${val%% *}" "${val#* }"; fi
 }
 
 ensure_packages() {
@@ -409,14 +246,12 @@ ensure_packages() {
 dry_run_plan() {
   say "--dry-run：只列出要做的事，什么都没改。"
   say "1. 检查 dsh；缺 python3、curl 才装；没有 InstaBox 命令行就 npm i -g instabox@$INSTABOX_VERSION。"
-  say "2. 从 $BASE 下载网关插件、ib、技能和手动切主机用的配置。"
+  say "2. 从 $BASE 下载网关插件和 ib。"
   say "3. 问 li2$([ "$1" = 1 ] || echo '、li') 所在账号的 InstaBox key（只要 machines:read 和 machines:write），用 instabox get 核对后存到 $KEY_DIR（权限 600）。"
   say "4. 网关没装就从 li2（不行再从 li）取安装包 $REMOTE_ZIP，核对大小和 SHA-256 后解到 $GW_DIR；插件放到 $PLUGIN_DIR，第一次装时挂进 web 配置。"
   say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉。"
-  say "6. 装 ib 到 $BIN_DIR/ib，技能到 $SKILL_DIR/SKILL.md。"
-  say "7. 在每台云电脑上：停掉小芯、天启的后台服务（xin-kernel-resident、xin-reaper，文件不删）；删以前的租约插件；把本机网关的 key 给 Codex（~/.config/liming、~/.profile 一行、Codex 配置的本机网关线路，先备份）；"
-  say "   装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium；写手动切主机用的 dsh-tablet 和 web 配置；"
-  say "   第一次从 Harness 自带模板建 tablet 配置、装 dsh-task（平板 AI 交任务给 Harness 用）；看 Antigravity 登没登录。"
+  say "6. 装 ib 到 $BIN_DIR/ib。"
+  say "7. 在每台云电脑上：装浏览器命令行 @playwright/cli@$PLAYWRIGHT_CLI_VERSION 和 Chromium；看 Antigravity 装没装、登没登录。"
 }
 
 summary() {
@@ -424,14 +259,13 @@ summary() {
   say ""
   say "装好了。"
   say "· 网关：$GW_DIR/current（$VERSION），日志在 $GW_DIR/logs/；插件 $PLUGIN_DIR"
-  say "· ib：$BIN_DIR/ib；技能：$SKILL_DIR"
-  [ "$OLD_REMOVED" = 1 ] && say "· 旧的云端任务插件已删掉（平板和云电脑上的旧令牌、旧 key 一起删了；InstaBox 后台那几把旧 key 可以吊销）"
+  say "· ib：$BIN_DIR/ib"
+  [ "$OLD_REMOVED" = 1 ] && say "· 旧的云端任务插件已删掉（平板上的旧令牌、旧 key 一起删了；InstaBox 后台那几把旧 key 可以吊销）"
   while IFS= read -r line; do [ -n "$line" ] && say "· $line"; done <<<"$1"
   cat <<'EOF'
 
 以后直接在聊天里让 AI 用云电脑，比如「看看 li2 上 /data/workspace 里有什么」「在 li 上编译这个工程」
-「在 li2 上打开某个网页帮我查」「把这个功能交给 li 上的 Codex 做，做完你检查」。
-编程代理：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity。Antigravity 要你先在两台上各登一个谷歌账号。
+「在 li2 上打开某个网页帮我查」。
 想看云上的浏览器：在 InstaBox 网页打开那台机器的 Computer 页签。
 
 第一次装时还要在 App 里：
@@ -439,7 +273,7 @@ summary() {
 2. 浏览器打开 http://127.0.0.1:8788 ，用 admin 登录，先在设置里改密码，再加网关账号，然后在「设置 → API Key」新建一把 key。
 3. 设置 › 模型 › 添加渠道：兼容协议 Responses，Base URL http://127.0.0.1:8788/v1，API Key 填上一步的 key；获取模型，勾 deepseek-v4.1-flash、glm-5.4、kimi-k3.1-pro。
 4. 设置 › 手机操控：打开开关，开无障碍和通知。
-5. 新开一个对话，技能才会生效。
+5. 新开一个对话，新装的配置才会生效。
 
 别做：别点「重置运行环境」（会删掉网关、账号和这里存的 key；真重置了就再跑一次这个脚本）。
 EOF
@@ -470,10 +304,6 @@ main() {
   fetch_file "$BASE/liming-gateway/lib/index.js" "$WORK/plugin/lib/index.js" 'liming-gateway' || die "插件没下载下来"
   fetch_file "$BASE/liming-gateway/lib/gateway.js" "$WORK/plugin/lib/gateway.js" 'createSupervisor' || die "插件没下载下来"
   fetch_file "$BASE/ib.sh" "$WORK/ib.sh" 'LIMING_IB_DIR' || die "ib 没下载下来"
-  fetch_file "$BASE/skills/liming-cloud-computers/SKILL.md" "$WORK/SKILL.md" 'name: liming-cloud-computers' || die "技能没下载下来"
-  fetch_file "$BASE/dsh-tablet.sh" "$WORK/dsh-tablet.sh" 'dsh-tablet' || die "包装脚本没下载下来"
-  fetch_file "$BASE/dsh-task.sh" "$WORK/dsh-task.sh" 'dsh-task' || die "包装脚本没下载下来"
-  fetch_file "$BASE/dsh-tablet-profile.yml" "$WORK/dsh-tablet-profile.yml" '- id: llm-pi-ai' || die "tablet 配置没下载下来"
 
   if [ "$skip_li" = 1 ]; then setup_keys li2; else setup_keys li2 li; fi
   [ -n "$HAVE" ] || die "至少要一把 InstaBox key：在 InstaBox 后台 API keys 新建，只勾 machines:read 和 machines:write（别勾删除），再运行这个脚本"
