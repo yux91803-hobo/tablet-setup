@@ -8,6 +8,7 @@ set -eu
 DIR=${LIMING_IB_DIR:-${HOME:-/root}/.config/liming/instabox}
 IB=${LIMING_INSTABOX:-instabox}
 MACHINES='li2 li'
+export INSTABOX_NO_UPDATE_CHECK=1
 
 # 参数里第一个机器名
 pick() {

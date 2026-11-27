@@ -1,0 +1,41 @@
+{
+  "name": "liming-crew",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Liming 工具箱自用：DSH Go 状态条和「团队」面板，在 App 里查看和操作 li、li2 上的 Antigravity。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": ["lib", "cordis.patch.yml"],
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshGo": {
+    "v": 1,
+    "title": { "zh": "团队", "en": "Crew" },
+    "icon": "robot",
+    "contributes": {
+      "composer.strip": [
+        { "id": "crew-strip", "icon": "robot", "panel": "crew" }
+      ],
+      "panels": [
+        {
+          "id": "crew",
+          "title": { "zh": "团队", "en": "Crew" },
+          "icon": "robot",
+          "placement": ["features", "chat.panel"]
+        }
+      ]
+    }
+  }
+}

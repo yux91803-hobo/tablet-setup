@@ -1,0 +1,4 @@
+# 装法：dsh plugin --profile web add ~/.dsh/dsh-go/plugins/liming-crew（装机脚本会做）
+- insert:
+    - id: liming-crew
+      name: liming-crew

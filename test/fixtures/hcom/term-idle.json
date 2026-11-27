@@ -1,0 +1,39 @@
+{
+ "cursor": [
+  20,
+  2
+ ],
+ "input_text": "",
+ "lines": [
+  "",
+  "  已通过 hcom 向 @bigboss 发送消息：“站长在网页上接管了”。",
+  "",
+  "────────────────────────────────────────────────────────────",
+  "> <hcom>[new message #42] bigboss -> keno</hcom>",
+  "",
+  "● Ran 2 commands (hcom send @bigboss -... ×2) (ctrl+o to expand)",
+  "",
+  "  已通过 hcom 回复 bigboss「醒了，还在」。",
+  "",
+  "────────────────────────────────────────────────────────────",
+  "> <hcom>[new message #48] bigboss -> keno</hcom>",
+  "",
+  "○ Thought for 5.2s (Directives require asking a specific question regarding...)",
+  "● Ran 2 commands (hcom send @bigboss -... ×2) (ctrl+o to expand)",
+  "",
+  "  已通过 hcom 向 bigboss 提问「串口波特率用 115200 还是",
+  "  9600？」，正在等待回复。",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────",
+  ">",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "? for shortcuts                                      auto · Gemini 4 Neon · high",
+  ""
+ ],
+ "prompt_empty": true,
+ "ready": true,
+ "size": [
+  24,
+  80
+ ]
+}

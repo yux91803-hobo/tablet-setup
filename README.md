@@ -1,53 +1,43 @@
 # 平板装机（DSH Go）
 
-在自己的安卓平板上装原版 [DSH Go](https://github.com/ccch1mneyyy/dsh-go)（DeepSeek Harness 的安卓 App），接上自己的网关，平板上的 AI 还能自己操作 li、li2 两台云电脑。App 本身不改，Harness 用 App 自带的版本，不另外升级。
+在自己的安卓平板上装原版 [DSH Go](https://github.com/ccch1mneyyy/dsh-go)（DeepSeek Harness 的安卓 App），接上自己的网关，并让平板上的 DSH 作为团队负责人，带着两台云电脑 `li`、`li2` 上常驻的 Antigravity 一起干活。App 本身不改，Harness 用 App 自带的版本，不另外升级。
 
-这个仓库只放平板的东西。根目录由 Cloudflare Pages 发布到 https://tablet.liming-work.com/ ，装机脚本从那里下载文件。2026-11-26 从 liming-work-site 搬出来，改平板不再跑网站的测试和部署。以前的设计：[平板版 DSH Go 第一步](https://github.com/yux91803-hobo/liming-work-site/blob/main/docs/superpowers/specs/2026-11-25-tablet-dshgo-design.md)、[平板 AI 直接操控 li、li2](https://github.com/yux91803-hobo/liming-work-site/blob/main/docs/superpowers/specs/2026-11-26-tablet-cloud-direct-design.md)。
+这个仓库只放平板的东西。根目录由 Cloudflare Pages 发布到 https://tablet.liming-work.com/ ，装机脚本从那里下载文件。设计与施工记录见 [`docs/superpowers/specs/2026-11-27-crew-design.md`](docs/superpowers/specs/2026-11-27-crew-design.md)。
 
 ## 用起来是什么样
 
 - **打开就说话**：本机引擎一启动，网关就跟着起来，十几秒内能用。模型是网关里的 DeepSeek V4.1 Flash、GLM-5.4、Kimi K3.1 Pro，都能看图。平时聊天不经过云电脑，所以不用等它们醒。
 - **签到**：网关每次启动 10 秒后巡检一次，当天还没签的账号会签上。哪天打开过 App，那天就签了。
 - **让它动平板**：「设置 › 手机操控」打开后，它能读屏、点按、输入。任务开始前确认一次，随时能停；密码、验证码、付款交还给你。
-- **让它动云电脑**：li、li2 是它的两台云电脑，它自己用，不用先问你。
-  - 看文件、改文件、跑命令、编译（STM32 相关的用 li）。
-  - 打开网页并操作。你想看的话，让它「开着界面」，然后在 InstaBox 网页打开那台机器的 Computer 页签，能看着它操作，也能点进去自己接手（登录、验证码）。
-  - 大的编程活可以交给云上的编程代理：li 用 Codex 和 Antigravity，li2 用 Harness 和 Antigravity。它们在云上后台跑，平板断开也不停；做完平板 AI 会收到通知，自己检查改动和测试，再告诉你结果。
-
-  它用的是 InstaBox 官方命令行（平板上的 `ib`）和一份技能说明，聊天里能看到它执行的每条命令和结果。睡着的机器第一次用要等十几到四十秒叫醒。
-- **手动切主机只留着调试**：对话列表底部点主机名还能切到 li2、li，日常用不着。
-
-小芯、天启已经停用（2026-11-26）。云电脑上它们的后台服务已经关掉：li 上当天停了，li2 会在你重跑装机脚本时停。它们的文件没删，想恢复就在那台上运行 `systemctl --user enable --now xin-kernel-resident.service xin-reaper.timer`。
+- **让 DSH 带队干活**：你平时只跟平板上的 DSH 聊天。DSH 拆活、派给 `li` 和 `li2` 上常驻的 Antigravity、挂后台等进展、安排两台交叉审查 PR、验收后合并并向你汇报。两台之间不直接对话，需要配合时由 DSH 居中转达。
+- **在 DSH Go 里直接看现场**：装好插件 `liming-crew` 后，输入框上方有一行状态条，全部功能（以及聊天页「插件」弹层）里有「团队」面板。打开面板就能看到两台的最近动作和终端画面，直接插话、叫停、批准/拒绝，需要接管时也能点「网页」打开远程控制链接。
+- **直接用云电脑**：DSH 仍能用 `ib` 在 `li`、`li2` 上跑命令、看改文件、编译（STM32 相关的优先用 `li`），或用 `playwright-cli` 操作网页。
 
 ## 第一次装
 
 只有这几步要自己动手：
 
 1. **装 App**：从 [GitHub Releases](https://github.com/ccch1mneyyy/dsh-go/releases/latest) 或 go.dshtui.com 下载 arm64 的 APK 安装。首次启动选「本机」，等运行环境装好。然后到「设置 › 隐私与分享」关掉「发送匿名使用统计」。
-2. **建两把 InstaBox key**：li2、li 在两个不同的 InstaBox 账号里，每个账号各建一把。在后台「API keys」新建，**只勾 `machines:read` 和 `machines:write`，千万别勾删除**（`machines:delete`）。有了这两样，平板 AI 能叫醒和操作机器，但删不掉机器。
-   - 以前为云端任务建过的只读 key、写 key 用不上了，可以在后台吊销。
-3. **跑装机脚本**：在 App 里打开一个对话 → 全部功能 → 终端，粘贴
+2. **建两把 InstaBox key**：`li2`、`li` 在两个不同的 InstaBox 账号里，每个账号各建一把。在后台「API keys」新建，**只勾 `machines:read` 和 `machines:write`，千万别勾删除**（`machines:delete`）。有了这两样，平板 AI 能叫醒和操作机器，但删不掉机器。
+3. **在两台云电脑上做一次首次设置和 GitHub 登录**：
+   - 在 InstaBox 网页分别打开 `li`、`li2` 的 Computer 页签，开终端运行一次 `agy`，自己走完配色与数据使用条款后退出（脚本不会替你点条款或碰谷歌登录令牌）。
+   - 顺手各运行一次 `gh auth login`，按提示用设备码登录 GitHub（平板不放 GitHub 权限）。
+4. **跑装机脚本**：在 App 里打开一个对话 → 全部功能 → 终端，粘贴：
 
-   ```
+   ```bash
    apt-get update && apt-get install -y curl && curl -fsSL https://tablet.liming-work.com/setup.sh | bash
    ```
 
-   App 里的 Linux 是精简版，一开始没有 curl，所以这一行先用 apt 装上它，再下载装机脚本。
-
-   按提示先粘贴 li2 账号的 key，再粘贴 li 账号的 key，粘贴时屏幕上不显示。
-   - 脚本会先核对这把 key 看得到那台机器才存；填反了会提示重新粘贴。不接 li 就直接回车。
-   - key 存在平板的 `~/.config/liming/instabox/`（权限 600），不会出现在任何输出里。
-   - 重跑时直接回车，就保留原来的 key。
-
-   脚本装好网关和插件、InstaBox 命令行、`ib`、技能，然后到 li2、li 上把 Codex 接上那台的网关、装好浏览器。以前装过的云端任务插件和旧 key，平板上和云电脑上都会顺手删掉。最后一台一行，告诉你准备好了没有；某台在冷却就稍后再跑一次。
-4. **加网关账号**：「设置 › 本机引擎」点重启。然后用平板浏览器打开 `http://127.0.0.1:8788`，用 `admin` 登录。
-   - **先改密码**：平板上别的 App 也能访问这个地址。
-   - 再加网关账号。平板用自己单独的账号，别和 li2 共用一个，两个 IP 同时用容易被风控。
-   - 最后在「设置 → API Key」新建一个 key。网关刚装好时不检查 key，建了以后才要求带 key。
-5. **加渠道**：「设置 › 模型 › 添加渠道」，按下面两张表填。
-6. **打开手机操控**：「设置 › 手机操控」打开开关，按页面提示开无障碍和通知。侧载的 App 开不了无障碍时，点「无障碍开关点不动？」，按手机品牌的说明「允许受限制的设置」。
-7. **新开一个对话**：技能是新对话开始时读的。
-8. **加主机（可选，只为调试）**：想手动连上云电脑看看时，「切换主机 › 管理远程主机 › 添加 SSH 主机」，按下面的表填，填完关掉「连接上次使用的主机」。这一步要用那台机器的 SSH 令牌（Connect → SSH tokens），装机脚本不用它。
+   App 里的 Linux 是精简版，一开始没有 curl，所以先装它再下载装机脚本。
+   - 按提示先粘贴 `li2` 账号的 key，再粘贴 `li` 账号的 key（不回显；核对看得到机器才存到 `~/.config/liming/instabox/`，权限 600；重跑时直接回车保留原来的 key）。
+   - 接着会问一次：**「允许 crew 在云电脑上自动信任它新建的项目目录吗？（y/N）」**。同意后写下标记，以后 `crew start` 遇到新目录信任提示时才会自动确认；不同意或直接回车保持不变。
+   - 脚本装好网关和插件、`ib`、`crew`、技能「团队」（含 `TEAM.template.md`）和插件 `liming-crew`，删掉旧的「云电脑」技能与旧任务插件；再到 `li2`、`li` 上固定装 `hcom 0.7.31`、给 Antigravity 加 hcom 沙箱目录放行规则、检查 Antigravity 和 `gh` 登录、装浏览器命令行。
+   - 两台重建后如果网关安装包已经不在云电脑上，且平板本来还没装网关，脚本会给出清楚提示并继续装完其余部分，不会中断。
+5. **重启引擎并配好网关/渠道**：
+   - 「设置 › 本机引擎」点重启，网关和「团队」插件会跟着起来。
+   - 第一次装网关时，平板浏览器打开 `http://127.0.0.1:8788` 用 `admin` 登录，**先改密码**，加网关账号，再到「设置 → API Key」新建一把 key，并在「设置 › 模型 › 添加渠道」按下面两张表填好。
+6. **打开手机操控**：「设置 › 手机操控」打开开关，按页面提示开无障碍和通知。
+7. **新开一个对话**：技能「团队」在新对话开始时生效。
 
 ### 渠道
 
@@ -55,7 +45,7 @@
 |---|---|
 | 兼容协议 | Responses |
 | Base URL | `http://127.0.0.1:8788/v1` |
-| API Key | 第 4 步在面板里建的 key |
+| API Key | 在网关面板里建的 key |
 | 模型 | 点「获取模型」，勾 `deepseek-v4.1-flash`、`glm-5.4`、`kimi-k3.1-pro` |
 
 | 模型 | 上下文 | 输入类型 | 思考档位 |
@@ -64,71 +54,66 @@
 | GLM-5.4 | 1M | 文本和图片 | 低、高、最高 |
 | Kimi K3.1 Pro | 1M | 文本和图片 | 低、高、最高 |
 
-### 远程主机（调试用，li2、li 各加一台）
+## 团队：DSH 带 li、li2 上的 Antigravity 干活
 
-| 项 | 填 |
-|---|---|
-| 主机 | 令牌行里 `@` 右边那段 |
-| 用户名 | 令牌行里 `@` 左边那段（`ibssh_…`） |
-| 端口 | 22 |
-| 登录 | 选密码，随便填一个（令牌本身就是用户名）。连不上就把报错截图发给 AI |
-| 实例管理 | 托管启动 |
-| 启动命令 | `/data/home/.local/bin/dsh-tablet`，后面**不要**加 `web` |
-| 工作目录 | `/data/workspace/tablet` |
+直接跟平板上的 DSH 说要做的事，例如：「在 li2 上开个项目，写一个……」「让 li 和 li2 分工做 STM32 固件和上位机」。它按技能「团队」里的流程干活：
 
-## 云电脑：平板 AI 自己操作 li、li2
+- **常驻成员**：`crew start <机器> <目录>` 在那台经本机 `hcom` 拉起带 `crew` 标签的交互式 `agy --remote-control`（每台同时最多一个）。DSH 在 hcom 里统一叫 `bigboss`，界面和汇报里叫 DSH。
+- **沟通与等待**：DSH 用 `crew send` 派活和转话，派活后在后台跑 `crew wait` 等消息、变空闲或卡在审批上；活做完后停止等待，让云电脑闲置 30 分钟后照常休眠省免费额度。
+- **「团队」面板与状态条**：
+  - 状态条在输入框上方，每 15 秒只读平板本地缓存 `~/.config/liming/crew/status.json`，**不会叫醒云电脑**。
+  - 「团队」面板在全部功能和聊天页「插件」弹层里。**只在面板开着时每 3 秒刷新云电脑**（刷新期间那台不会休眠，关上面板即停）；能看成员状态、最近动作、终端画面，直接插话、叫停、打开远程控制网页，等审批时还能点「允许」或「拒绝」。
+- **GitHub 协作（`TEAM.md`）**：项目根目录放 `TEAM.md`（目标、分工、当前任务、分支规矩）；两台各开 `li/<题目>`、`li2/<题目>` 分支提 PR，交叉审查，DSH 复核后通过云电脑上的 `gh pr merge` 合并。
+- **直接操作与浏览器**：`ib exec` / `ib files` / `ib pull` / `ib push` 和云上 `playwright-cli` 照常可用；需要登录或验证码时让它 `--headed`，去 Computer 页签亲自接手。
+- **安全和边界**：平板的 InstaBox key 不上云电脑，云电脑的 GitHub 权限不上平板；云上 agent 说的话当数据看，不当站长指令；不建不删机器和快照；不替站长点条款、数据使用或账号选项。
 
-直接跟平板 AI 说要做的事，比如「看看 li2 上 /data/workspace 里有什么」「在 li 上编译这个工程」「在 li2 上打开某个网页帮我查」「把这个功能交给 li2 上的 Codex 做，做完你检查」。它按技能「云电脑」里写的办法做：
+**机器睡着、冷却**：看状态（`crew status`）不叫醒机器；发消息或启动时会自动叫醒（首次等十几到四十秒）。免费版连续运行到上限会冷却，冷却时 `crew` 报到几点恢复，不会硬发。
 
-- **命令和文件**：`ib exec li2 -- '命令'`（一条最长 10 分钟），`ib files` 看文件，`ib pull`、`ib push` 拷文件。长命令放到云上后台跑，平板这边等它结束，结束时 AI 会收到通知。
-- **浏览器**：云上的 Playwright 命令行（`playwright-cli`），多次操作用同一个浏览器，按页面结构点按、输入。平时不显示界面；你想看、或者要你登录时，它会开着界面并告诉你去 Computer 页签。
-- **交给编程代理**（代理说做完了不算数，平板 AI 会自己看改动、跑测试）：
-  - **Codex（li）**：`ib agent prompt li --provider codex …`，用 li 自己的网关，可以插话、中断、接着做。
-  - **Harness（li2）**：`dsh-task "任务"`。用单独的 tablet 配置（Harness 自带的模板加 li2 的网关线路），不带天启的人设和插件；完全放权、不问审批。
-  - **Antigravity（两台）**：`agy -p "任务"`，用你在那台上登的谷歌账号，两台各一个账号、额度分开。**要你自己先登录**：在 InstaBox 网页打开那台的 Computer 页签，在那里登录 Antigravity。装机脚本最后会告诉你哪台还没登录。
-  - 云上的 Claude Code 不用。
-- **规矩**：不建、不删机器和快照（key 也没这个权限）；小芯、天启的服务已关、别再打开，留下的文件不动；网关别停，Codex、Harness 要用它。
-
-**机器睡着、冷却**：用到时自动叫醒，第一次要等十几到四十秒。免费版一轮最多 120 到 480 分钟，到了会暂停、冷却一阵，那段时间用不了那台。AI 会看状态（`ib ls` 不叫醒机器），换另一台或者告诉你几点能用。
-
-**平板丢了**：去两个 InstaBox 账号的后台，吊销这两把 key（还有调试用的 SSH 令牌，如果建过）。
+**平板丢了**：去两个 InstaBox 账号的后台，吊销这两把 key。
 
 ### 装好后对照
 
-1. 让 AI「看看 li2 的 /data/workspace 里有什么」：它跑 `ib`，回你目录列表。睡着的话先等一会儿。
-2. 让 AI「在 li2 上打开 example.com，告诉我页面标题，开着界面」：同时在 InstaBox 网页里打开 li2 的 Computer 页签，能看到浏览器开着。
-3. 让 AI「在 li 上新建一个小工程，让 Codex 写个 hello world 程序并跑通，你检查一下」；再让它「在 li2 上交给 Harness 做同样的事」。代理在云上做，做完平板 AI 收到通知，自己检查后告诉你结果。
-4. 登录 Antigravity 以后，让 AI「在 li2 上交给 Antigravity 写个小程序」，li 上也试一次。
-5. 什么都不做、空闲 30 分钟：li2、li 照常睡。
+1. 重跑装机命令，每台一行结果全是「准备好了」，或者明确写着还差你做什么。
+2. 让 DSH「在 li2 上开个测试项目，让 li2 写个小程序」：
+   - 打开「团队」面板能看到 li2 在干活，画面会动；
+   - 在面板里插一句话，它能收到；
+   - 按「叫停」，它会停下。
+3. 让 li2 问 DSH 一个问题，DSH 自己来找你。
+4. 做完后状态条显示空闲，什么都不做且关掉面板，li2 半小时后照常睡着。
 
 ## 别做的事
 
-- **别点「设置 › 本机引擎 › 重置运行环境」**：它会删掉 `/root`，网关、账号和这里存的 key 一起没了（技能目录会保留）。真要重置，之后重跑装机脚本、重新加网关账号。
-- **手动连上云电脑用完切回「本机」**：一直连着，那台就不睡；到了免费版连续运行的上限（120 到 480 分钟）会被冷却。AI 自己用云电脑不需要切主机。
+- **别点「设置 › 本机引擎 › 重置运行环境」**：它会删掉 `/root`，网关、账号和这里存的 key 一起没了（`$DSH_HOME` 下的技能和 `liming-crew` 插件目录会保留）。真要重置，之后重跑装机脚本。
 - **建 key 别勾删除权限**：`machines:read` 和 `machines:write` 就够了。
+- **不看现场时关掉「团队」面板**：面板开着会每 3 秒读云电脑，那台不会休眠。
 
 ## 出问题看哪里
 
 - 网关日志在 `/root/workbuddy-gateway/logs/gateway.log`，插件日志在同目录的 `plugin.log`。
-- 插件 10 分钟内重启 3 次还起不来，就先停下，等下次重启引擎再试。日志写「8788 被其他程序占用」，说明端口被别的程序占了。
 - `ib` 报「没有 li 的 key」：重跑装机脚本，粘贴那台所在账号的 key。报 `missing_scope`：那把 key 少勾了 `machines:write`，新建一把再跑。
-- 云上的 Codex 报 401：那台的网关 key 没接上，重跑装机脚本；还不行，看那台的 `~/.config/liming/gateway.key` 在不在。报 400、说这个 Key 不允许该模型：到那台电脑的网关面板「设置 → API Key」，给对应的 key 在「允许模型」里加上它。
-- 重跑装机脚本不会重新下载网关，也不碰账号。插件在 App 里被删了、想重新挂上，先删掉 `/root/liming-gateway/.added` 再跑。
+- `crew` 退出码对照：
+  - `3`：那台的 `agy` 还没做首次设置或停在服务条款页 → 到 Computer 页签开终端跑一次 `agy` 选完再退。
+  - `4`：停在「信任目录」页且平板没同意自动信任 → 重跑装机脚本时选 `y`，或到 Computer 页签手动信任。
+  - `5`：机器正在冷却 → 等到提示的恢复时间，或改用另一台。
+  - `6`：那台还没有运行中的 `crew` agent → 先 `crew start`。
+  - `7`：当前不在等审批，或画面认不出审批提示 → `crew screen` 检查原画面，没把握不按键。
+  - `8`：`crew wait` 等待超时。
+  - `9`：远端出错，或 `agy` 更新后画面认不出来（stderr 会打出原画面）。
+- 重跑装机脚本不会重新下载已装好的网关，也不碰网关账号。某个插件在 App 里被删了想重挂：删掉对应插件目录里的 `.added`（`/root/liming-gateway/.added` 或 `~/.dsh/dsh-go/plugins/liming-crew/.added`）再跑。
 - 只想看看脚本要做什么：`curl -fsSL https://tablet.liming-work.com/setup.sh | bash -s -- --dry-run`。
 
 ## 仓库里的文件
 
 | 文件 | 是什么 |
 |---|---|
-| `setup.sh` | 装机脚本 |
-| `liming-gateway/` | DSH 插件：网关跟着本机引擎启停 |
+| `setup.sh` | 平板装机脚本（含云端准备脚本） |
 | `ib.sh` | 平板上的 `ib`：按机器选那台所在账号的 key，跑 InstaBox 命令行 |
-| `skills/liming-cloud-computers/SKILL.md` | 平板 AI 的技能「云电脑」：怎么用 li、li2 |
-| `dsh-task.sh` | 放到 li、li2 上的 `dsh-task`：平板 AI 把任务交给 Harness 时用，单独的 `tablet` 配置、完全放权 |
-| `dsh-tablet.sh` | 放到 li、li2 上的包装脚本（手动切主机用）：读本机网关 key，固定用 Harness 内置的 `web` 配置 |
-| `dsh-tablet-profile.yml` | li、li2 上 `web`、`tablet` 两份 Harness 配置的网关线路，手动维护 |
+| `crew.sh` | 平板上的 `crew`：拉起、状态、画面、日志、发消息、叫停、接管、批准、后台等待 |
+| `liming-gateway/` | DSH 插件：平板本机 WorkBuddy 网关跟着引擎启停 |
+| `liming-crew/` | DSH Go 原生插件：输入框上方状态条和「团队」协作面板 |
+| `skills/liming-crew/` | 平板 AI 的技能「团队」（`SKILL.md`）和项目协作模板（`TEAM.template.md`） |
 | `404.html` | 缺的文件回 404，打开根地址能看到装机命令 |
-| `test/` | 测试，GitHub Actions 每个 PR 和 main 都跑 |
+| `test/` | 自动化测试与 hcom 画面/事件样例，GitHub Actions 每个 PR 和 main 都跑 |
 
 网关程序（WorkBuddy2API-Hub）和任何账号、key 都不进仓库，因为仓库是公开的，根目录下的每个文件也都会发布出去。装机脚本只写死原版安装包的大小和 SHA-256。
 

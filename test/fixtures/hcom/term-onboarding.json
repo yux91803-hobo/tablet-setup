@@ -1,0 +1,39 @@
+{
+ "cursor": [
+  23,
+  0
+ ],
+ "input_text": "terminal",
+ "lines": [
+  "Welcome to Antigravity CLI!",
+  "",
+  "Choose your color scheme:",
+  "",
+  "  > terminal",
+  "    light",
+  "    dark",
+  "",
+  "    [Next]",
+  "",
+  "  ↑/↓ Navigate · enter Confirm",
+  "                                                     auto · Gemini 4 Neon · high",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ],
+ "prompt_empty": false,
+ "ready": false,
+ "size": [
+  24,
+  80
+ ]
+}
