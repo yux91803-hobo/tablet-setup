@@ -935,6 +935,50 @@ test('stopped-at 比状态新时显示「空闲（刚叫停）」且 wait 立即
   assert.equal(ag2.stopped, undefined);
 });
 
+test('send、type、approve 成功后会删掉 stopped-at，之后 wait 不再提前以刚叫停返回', (t) => {
+  const now = Math.floor(Date.now() / 1000);
+  // send 成功后删掉 stopped-at，随后的 wait 不再提前返回 crew:stopped
+  const sendRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'active', status_age_seconds: 40, unread_count: 0 }),
+      'li2-events.jsonl': '',
+    },
+  });
+  const stopFile1 = path.join(sendRig.stateDir, 'li2.stopped-at');
+  fs.writeFileSync(stopFile1, `${now - 5}\n`);
+  const rs = sendRig.run(['send', 'li2', '新指令'], { env: { LIMING_CREW_SEND_POLL: '0.05', LIMING_CREW_SEND_WAIT: '0.15' } });
+  assert.equal(rs.status, 0, rs.stderr);
+  assert.ok(!fs.existsSync(stopFile1), 'send 成功后应删掉 li2.stopped-at');
+  const rw = sendRig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(rw.status, 8, '删掉 stopped-at 后 wait 应正常等待直至超时 8，不能提前返回 crew:stopped：' + rw.stdout + rw.stderr);
+
+  // type 成功后删掉 stopped-at
+  const typeRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: { 'li2-list.json': makeCrewListFixture({ status: 'active', status_age_seconds: 40 }) },
+  });
+  const stopFile2 = path.join(typeRig.stateDir, 'li2.stopped-at');
+  fs.writeFileSync(stopFile2, `${now - 5}\n`);
+  const rt = typeRig.run(['type', 'li2', '/status']);
+  assert.equal(rt.status, 0, rt.stderr);
+  assert.ok(!fs.existsSync(stopFile2), 'type 成功后应删掉 li2.stopped-at');
+
+  // approve 成功后删掉 stopped-at
+  const appRig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'blocked', status_age_seconds: 40 }),
+      'li2-term.json': JSON.parse(readFixture('term-approval.json')),
+    },
+  });
+  const stopFile3 = path.join(appRig.stateDir, 'li2.stopped-at');
+  fs.writeFileSync(stopFile3, `${now - 5}\n`);
+  const ra = appRig.run(['approve', 'li2', 'yes']);
+  assert.equal(ra.status, 0, ra.stderr);
+  assert.ok(!fs.existsSync(stopFile3), 'approve 成功后应删掉 li2.stopped-at');
+});
+
 test('type 把换行变成空格，再按回车，且文字不出现在 ib 参数里', (t) => {
   const { run, ibLog, hcomLog } = rig(t, {
     machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },

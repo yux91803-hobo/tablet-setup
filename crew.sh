@@ -930,6 +930,7 @@ sys.exit(0)'
       exit 9
     fi
   fi
+  rm -f "$STATE_DIR/$m.stopped-at"
 }
 
 cmd_stop() {
@@ -1014,6 +1015,7 @@ cmd_type() {
       exit 9
     fi
   fi
+  rm -f "$STATE_DIR/$m.stopped-at"
 }
 
 cmd_approve() {
@@ -1078,6 +1080,7 @@ sys.exit(0 if ok else 1)
     say_err "向 $m 发送审批按键失败"
     exit 9
   fi
+  rm -f "$STATE_DIR/$m.stopped-at"
 }
 
 WAIT_M=()
