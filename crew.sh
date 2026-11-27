@@ -1196,7 +1196,7 @@ print(json.dumps({"machine": m, "event": ev, "stopped": True}, ensure_ascii=Fals
       saved=$(tr -d '[:space:]' < "$STATE_DIR/$m.last-id")
       if is_uint "$saved"; then last_id=$saved; fi
     fi
-    sql="((type = 'message' AND (instance = '$base' OR msg_from = '$base')) OR (type = 'status' AND instance = '$base' AND status_val IN ('listening', 'blocked'))) AND id > $last_id"
+    sql="((type = 'message' AND (instance = '$base' OR msg_from = '$base')) OR (type = 'status' AND instance = '$base' AND status_val IN ('listening', 'blocked') AND COALESCE(status_context, '') NOT IN ('start', 'pty:recovered'))) AND id > $last_id"
     printf -v qsql '%q' "$sql"
     if ! job_raw=$("$IB" exec --background --json "$m" -- "export PATH=\"\$HOME/.local/bin:\$PATH\"; hcom events --wait $wait_sec --sql $qsql" </dev/null 2>/dev/null); then
       wait_cleanup_jobs -1

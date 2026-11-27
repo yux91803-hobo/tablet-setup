@@ -195,10 +195,17 @@ if (sub === 'events') {
   if (waitIdx !== -1) {
     const waitSec = Number(args[waitIdx + 1] || '60');
     const delayMs = Number(readOr('wait-delay-ms', '0'));
-    // 过滤：只保留 agent 发出的消息，或 listening/blocked 状态事件
+    const exclStart = /'start'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
+    const exclRec = /'pty:recovered'/.test(sql) && /NOT\\s+IN|!=|<>/i.test(sql);
+    // 过滤：只保留 agent 发出的消息，或 listening/blocked 状态事件（按 SQL 排除 start / pty:recovered）
     const matched = lines.filter(e => {
       if (e.type === 'message' && !String(e.instance || '').startsWith('ext_')) return true;
-      if (e.type === 'status' && e.data && (e.data.status === 'listening' || e.data.status === 'blocked')) return true;
+      if (e.type === 'status' && e.data && (e.data.status === 'listening' || e.data.status === 'blocked')) {
+        const ctx = String(e.data.context || '');
+        if (exclStart && ctx === 'start') return false;
+        if (exclRec && ctx === 'pty:recovered') return false;
+        return true;
+      }
       return false;
     });
     if (matched.length > 0) {
@@ -1156,4 +1163,38 @@ test('wait：全部在冷却以 5 退出；--timeout 超过 50 分钟以 2 退�
   assert.ok(!ibLog().some(l => l.startsWith('exec ')));
   const bad = run(['wait', 'li2', '--timeout', '51']);
   assert.equal(bad.status, 2);
+});
+
+test('wait：排除 status_context 为 start 和 pty:recovered 的状态事件，等到真正空闲才返回', (t) => {
+  const startEv = { id: 407, instance: 'keno', type: 'status', ts: '2026-11-27T15:00:01', data: { status: 'listening', context: 'start' } };
+  const recEv = { id: 408, instance: 'keno', type: 'status', ts: '2026-11-27T15:00:05', data: { status: 'listening', context: 'pty:recovered' } };
+  const realIdle = { id: 409, instance: 'keno', type: 'status', ts: '2026-11-27T15:00:20', data: { status: 'listening', context: '' } };
+
+  // 只有 start 和 pty:recovered 时不应返回，超时退出 8
+  const r1Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-events.jsonl': [startEv, recEv].map(e => JSON.stringify(e)).join('\n') + '\n',
+    },
+  });
+  const r1 = r1Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(r1.status, 8, 'start 和 pty:recovered 不算干完了，应超时退出 8：' + r1.stdout + r1.stderr);
+
+  // 后面有真正空闲（context 为空）时跳过 407/408，返回 409
+  const r2Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture(),
+      'li2-events.jsonl': [startEv, recEv, realIdle].map(e => JSON.stringify(e)).join('\n') + '\n',
+    },
+  });
+  const r2 = r2Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '5' } });
+  assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  const out2 = JSON.parse(r2.stdout);
+  assert.equal(out2.event.id, 409);
+  const evCalls = r2Rig.hcomLog().filter(c => c.args[0] === 'events');
+  assert.ok(evCalls.length >= 1);
+  const sql = evCalls[0].args[evCalls[0].args.indexOf('--sql') + 1] || '';
+  assert.match(sql, /COALESCE\(status_context,\s*''\)\s+NOT\s+IN\s*\(\s*'start'\s*,\s*'pty:recovered'\s*\)/i, 'SQL 应安全排除 start 和 pty:recovered：' + sql);
 });
