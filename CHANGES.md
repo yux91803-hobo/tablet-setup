@@ -2,7 +2,7 @@
 
 最新的在最上面。搬出来以前的记录（2026-11-25、11-26）在 liming-work-site 仓库的 `docs/CHANGES.md`。
 
-## 2026-11-27 晚 crew 第一版实测复核修复（6 项）
+## 2026-11-27 晚 crew 第一版实测复核修复（10 项）
 
 - **沙箱在 InstaBox 上起不来（`setup.sh`）**：
   - **根因**：InstaBox 在 `/proc/sys/kernel/random/boot_id` 上盖了一层 tmpfs，Linux 内核 `fs/namespace.c` 的 `mnt_already_visible` 判定现有 `/proc` 被遮挡，拒绝子进程在新用户命名空间里再挂 proc（`mount(..., "proc", ...)` 返回 `EPERM`），导致 `agy` 每次先在沙箱里失败再走 `BypassSandbox`、频繁卡审批。
@@ -16,8 +16,14 @@
   - **根因**：`agy` 被 ESC 打断时不触发钩子，hcom `src/delivery.rs` 只有在有待送消息时才会在画面 10 秒不变后自愈（`pty:recovered`）。
   - **修法**：`crew stop` 注入 ESC 后每秒查 `hcom term <name> --json` 最多 8 秒，等到 `ready == true` 后把当前 epoch 秒写进 `$STATE_DIR/<机器>.stopped-at` 并输出「已叫停 `<机器>`」（退出码 0），等不到则提示看 `crew screen` 并以 9 退出；`crew status`、状态缓存和插件面板在 `active` 开始时间早于 `stopped-at` 时显示「空闲（刚叫停）」（JSON 写 `status: "listening"` 并加 `"stopped": true`）；`crew wait` 遇到此类状态立即按空闲返回 0。
 - **关掉 InstaBox 更新提示（`ib.sh`）**：调用 `instabox` 前 `export INSTABOX_NO_UPDATE_CHECK=1`，避免 stderr 每次多出版本更新提示。
-- **参考**：hcom 0.7.31 源码 `src/pty/screen.rs`（`get_antigravity_input_text`）、`src/delivery.rs`（`pty:recovered`）；Linux 内核 `fs/namespace.c`（`mnt_already_visible`）；InstaBox 文档（`INSTABOX_NO_UPDATE_CHECK`）。
-- **验证**：`node --test test/*.test.cjs` 97/97 通过（新增测试均先红后绿）；CI 写法 `shellcheck setup.sh ib.sh crew.sh` 无警告；`kit/bin/check.mjs liming-crew --load --lang zh`、`--budget panel`、`--budget strip` 均 0 错误、0 警告。
+- **叫停后发新指令不再提前返回「刚叫停」（`crew.sh`）**：`crew send`、`crew type`、`crew approve` 成功后删掉 `$STATE_DIR/<机器>.stopped-at`，避免旧的 `stopped-at` 让后续 `crew wait` 马上以 `crew:stopped` 返回。
+- **`crew wait` 排除非完工的 `listening` 状态（`crew.sh`）**：SQL 过滤条件加上 `COALESCE(status_context, '') NOT IN ('start', 'pty:recovered')`，排除刚启动和 hcom 自愈时的过渡空闲状态。
+- **`crew wait` 三步补查按顺序取事件不漏消息（`crew.sh`）**：
+  - **根因**：hcom 0.7.31 `src/commands/events.rs` 的 `events_wait` 启动时只回看最近 10 秒且按 `ORDER BY id DESC LIMIT 1` 返回最新一条，没有就只等启动后的新事件，导致上次 wait 与本次 wait 之间的积压或短时间并发事件丢失。
+  - **修法**：单次 `ib exec --background` 任务按三步执行——先非阻塞查 `id > last_id` 取最小 id 事件；没有再 `hcom events --wait`；等到后再非阻塞查一次取最小 id 事件，一次只返回一条并更新 `last-id`。
+- **`crew send` 发前回显未读回复、发后推进 `last-id`（`crew.sh`、`skills/liming-crew/SKILL.md`）**：在同一次 `ib exec --stdin` 里，发消息前先查 `id > last_id` 的 agent 消息并由平板侧按时间顺序打到 stderr；发完后查刚发出的 `bigboss` 消息 id，将 `$STATE_DIR/<机器>.last-id` 更新为 `max(原值, 新 id)`，避免发指令之前的旧 `listening` 骗过下一次 `crew wait`；同步补充 `skills/liming-crew/SKILL.md` 说明。
+- **参考**：hcom 0.7.31 源码 `src/pty/screen.rs`（`get_antigravity_input_text`）、`src/delivery.rs`（`pty:recovered`）、`src/commands/events.rs`（`events_wait`）、`src/db/mod.rs`（`events_v.status_context`）；Linux 内核 `fs/namespace.c`（`mnt_already_visible`）；InstaBox 文档（`INSTABOX_NO_UPDATE_CHECK`）。
+- **验证**：`node --test test/*.test.cjs` 101/101 通过（新增测试均先红后绿）；CI 写法 `shellcheck setup.sh ib.sh crew.sh` 无警告；`kit/bin/check.mjs liming-crew --load --lang zh`、`--budget panel`、`--budget strip` 均 0 错误、0 警告。
 - **谁做的**：实现：Antigravity（Gemini 4 Neon）；复核：Claude Code。
 
 ## 2026-11-27 crew 第一版：平板 DSH 带 li、li2 上的 Antigravity 组队干活
