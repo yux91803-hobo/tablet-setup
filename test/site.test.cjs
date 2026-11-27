@@ -38,3 +38,10 @@ test('根目录有 404.html：缺的文件回 404（以后加了首页，Pages �
   assert.ok(s.includes('curl -fsSL https://tablet.liming-work.com/setup.sh | bash'),'页面上要写装机命令');
   assert.match(s,/<meta name="viewport"/,'手机上能看');
 });
+
+test('README 和 AGENTS 不再提 dsh-task、dsh-tablet、Harness 的 tablet 配置',()=>{
+  for(const name of ['README.md','AGENTS.md']){
+    const s=fs.readFileSync(path.join(root,name),'utf8');
+    assert.doesNotMatch(s,/dsh-task|dsh-tablet|profiles\/tablet|tablet 配置/,name+' 不应再提旧的 dsh-task/dsh-tablet/tablet 配置');
+  }
+});
