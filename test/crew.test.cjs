@@ -176,6 +176,19 @@ if (sub === 'kill') {
   process.exit(0);
 }
 if (sub === 'send') {
+  const raw = readOr('events.jsonl', '');
+  const extraPath = path.join(fakeDir, machine + '-runtime-events.jsonl');
+  const extra = fs.existsSync(extraPath) ? fs.readFileSync(extraPath, 'utf8') : '';
+  const all = (raw + '\\n' + extra).split('\\n').filter(Boolean).map(l => JSON.parse(l));
+  const maxId = all.reduce((m, e) => Math.max(m, Number(e.id) || 0), 0);
+  const newEv = {
+    id: maxId + 1,
+    instance: 'ext_bigboss',
+    type: 'message',
+    ts: new Date().toISOString().slice(0, 19),
+    data: { from: 'bigboss', text: stdin },
+  };
+  fs.appendFileSync(extraPath, JSON.stringify(newEv) + '\\n');
   process.stdout.write('Sent\\n');
   process.exit(0);
 }
@@ -209,6 +222,12 @@ if (sub === 'events') {
           }
           return false;
         });
+      } else if (/msg_from\\s*=\\s*'bigboss'/i.test(sql)) {
+        out = out.filter(e => e.type === 'message' && e.data && e.data.from === 'bigboss');
+      } else if (/type\\s*=\\s*'message'/i.test(sql) && !/\\bOR\\b/i.test(sql)) {
+        const im = /instance\\s*=\\s*'([^']+)'/i.exec(sql);
+        const base = im ? im[1] : null;
+        out = out.filter(e => e.type === 'message' && (!base || e.instance === base));
       }
     }
     out.sort((a, b) => Number(a.id) - Number(b.id));
@@ -755,9 +774,8 @@ test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令�
     assert.ok(sendCall.args.includes('@crew-keno'));
     assert.ok(!sendCall.args.includes('--stdin'), 'hcom 0.7.31 走管道不传 --stdin');
     assert.ok(!sendCall.args.join(' ').includes(msg), '文字不能出现在 hcom 参数里');
-    const sendIb = ibLog().find(l => l.includes('hcom send'));
+    const sendIb = ibLog().find(l => l.startsWith('exec li2 --stdin '));
     assert.ok(sendIb && sendIb.startsWith('exec li2 --stdin --timeout 60 -- '), '应经 ib exec --stdin 发送');
-    assert.ok(sendIb.includes('hcom send --from bigboss @crew-keno'));
     if (firstSendIb === null) firstSendIb = sendIb;
     assert.equal(sendIb, firstSendIb, 'ib 参数里只应有固定命令，不能含用户文字');
   }
@@ -771,7 +789,7 @@ test('send 的文字原样到达，且文字不出现在 ib 和 hcom 的命令�
   assert.equal(r2.status, 0, r2.stderr);
   const s2 = rig2.hcomLog().find(c => c.args[0] === 'send');
   assert.equal(s2.stdin, raw);
-  assert.equal(rig2.ibLog().find(l => l.includes('hcom send')), firstSendIb);
+  assert.equal(rig2.ibLog().find(l => l.startsWith('exec li2 --stdin ')), firstSendIb);
 });
 
 test('send：立刻送到不注入；active 时绝不注入', (t) => {
@@ -863,6 +881,57 @@ test('send：空闲有未读但框里是别的文字时不注入，提示清空�
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /消息已排队：li2 的输入框里有没发出的文字，清空后才会送到/);
   assert.equal(rRig.hcomLog().filter(c => c.args[0] === 'term' && c.args[1] === 'inject').length, 0, '有人打字时绝不能注入');
+});
+
+test('send：发之前回显没看过的 agent 消息并更新 last-id，发完再 wait 不返回旧的 listening', (t) => {
+  const fastEnv = { LIMING_CREW_SEND_POLL: '0.05', LIMING_CREW_SEND_WAIT: '0.15', LIMING_CREW_SEND_AFTER: '0.3' };
+  // 情况 1：发之前有 2 条没看过的 agent 消息（101、103），夹着已看过的 100 和 bigboss 发的 102
+  const evs1 = [
+    { id: 100, instance: 'keno', type: 'message', ts: '2026-11-27T11:20:00', data: { from: 'keno', text: '旧消息已看过' } },
+    { id: 101, instance: 'keno', type: 'message', ts: '2026-11-27T11:26:51', data: { from: 'keno', text: '第一条未读回复' } },
+    { id: 102, instance: 'ext_bigboss', type: 'message', ts: '2026-11-27T11:30:00', data: { from: 'bigboss', text: 'DSH 发的' } },
+    { id: 103, instance: 'keno', type: 'message', ts: '2026-11-27T11:38:31', data: { from: 'keno', text: '第二条未读回复\n换行' } },
+  ];
+  const r1Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 0 }),
+      'li2-events.jsonl': evs1.map(e => JSON.stringify(e)).join('\n') + '\n',
+    },
+  });
+  fs.writeFileSync(path.join(r1Rig.stateDir, 'li2.last-id'), '100\n');
+  const r1 = r1Rig.run(['send', 'li2', '下一项任务'], { env: fastEnv });
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.equal(r1.stdout, '');
+  assert.match(r1.stderr, /li2 之前发来、你还没看过的消息：/);
+  const idx101 = r1.stderr.indexOf('#101 19:26 第一条未读回复');
+  const idx103 = r1.stderr.indexOf('#103 19:38 第二条未读回复 换行');
+  assert.ok(idx101 !== -1, '应打印 #101：' + r1.stderr);
+  assert.ok(idx103 > idx101, '应按时间顺序在 #101 之后打印 #103：' + r1.stderr);
+  assert.ok(!r1.stderr.includes('#100'), '不打印已看过的 #100');
+  assert.ok(!r1.stderr.includes('#102'), '不打印 bigboss 自己发的 #102');
+  assert.equal(fs.readFileSync(path.join(r1Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '104', 'last-id 应推进到刚发出的 bigboss 消息 id（104）');
+  assert.equal(r1Rig.ibLog().filter(l => l.startsWith('exec ')).length, 2, '查未读、发消息、查 sent-id 和确认送达都在同一次 ib exec 里完成');
+
+  // 情况 2：发之前只有旧的 listening（#205），没有未读消息；发完再 wait 不能返回这条旧的 listening
+  const evs2 = [
+    { id: 205, instance: 'keno', type: 'status', ts: '2026-11-27T11:40:00', data: { status: 'listening', context: '' } },
+  ];
+  const r2Rig = rig(t, {
+    machines: { li2: { id: 'm_li2', name: 'li2', state: 'running' } },
+    hcomFiles: {
+      'li2-list.json': makeCrewListFixture({ status: 'listening', unread_count: 0 }),
+      'li2-events.jsonl': evs2.map(e => JSON.stringify(e)).join('\n') + '\n',
+    },
+  });
+  fs.writeFileSync(path.join(r2Rig.stateDir, 'li2.last-id'), '200\n');
+  const r2 = r2Rig.run(['send', 'li2', '继续下一步'], { env: fastEnv });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(r2.stderr, '', '没有未读 agent 消息时 stderr 应为空');
+  assert.equal(fs.readFileSync(path.join(r2Rig.stateDir, 'li2.last-id'), 'utf8').trim(), '206');
+
+  const w2 = r2Rig.run(['wait', 'li2'], { env: { LIMING_CREW_WAIT_SECONDS: '1' } });
+  assert.equal(w2.status, 8, '发指令前的旧 listening（#205）不能被后续 wait 返回：' + w2.stdout + w2.stderr);
 });
 
 test('冷却时 send 以 5 退出，没 exec', (t) => {

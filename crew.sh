@@ -839,11 +839,23 @@ cmd_send() {
     msg="$*"
   fi
 
-  local ag name qname qm send_poll send_wait send_after qpoll qwait qafter verify_py send_cmd
+  local ag name base qname qbase qm last_id qlast send_poll send_wait send_after qpoll qwait qafter send_py send_cmd send_out new_last_id
   ag=$(require_crew_agent "$m")
   name=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
+  base=$(printf '%s' "$ag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["baseName"])')
+  case "$base" in
+    ''|*[!A-Za-z0-9_-]*) say_err "远端 agent 名称异常：$base"; exit 9 ;;
+  esac
+  last_id=0
+  if [ -r "$STATE_DIR/$m.last-id" ]; then
+    local saved
+    saved=$(tr -d '[:space:]' < "$STATE_DIR/$m.last-id")
+    if is_uint "$saved"; then last_id=$saved; fi
+  fi
   printf -v qname '%q' "$name"
+  printf -v qbase '%q' "$base"
   printf -v qm '%q' "$m"
+  printf -v qlast '%q' "$last_id"
   send_poll=${LIMING_CREW_SEND_POLL:-1}
   send_wait=${LIMING_CREW_SEND_WAIT:-3}
   send_after=${LIMING_CREW_SEND_AFTER:-10}
@@ -851,11 +863,57 @@ cmd_send() {
   printf -v qwait '%q' "$send_wait"
   printf -v qafter '%q' "$send_after"
 
-  # 发完消息后在同一次 ib exec 里确认送达；若 agy 刚启动时模式提示卡住投递，仅在空闲且画面完全匹配模式提示时补一次唤醒
-  verify_py='import json, re, subprocess, sys, time
-name, machine = sys.argv[1], sys.argv[2]
-poll_sec, wait_sec, after_sec = float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5])
+  # 同一次 ib exec --stdin 里完成：1) 查发前未读的 agent 消息；2) 原样经 stdin 调 hcom send；
+  # 3) 查刚发出的 bigboss 消息 id；4) 确认送达（空闲卡在模式提示时补一次唤醒）。
+  send_py='import json, re, subprocess, sys, time
+name, base, machine = sys.argv[1], sys.argv[2], sys.argv[3]
+last_id = int(sys.argv[4])
+poll_sec, wait_sec, after_sec = float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])
+Q = chr(39)
 MODE_RE = re.compile(r"^[A-Za-z-]+ mode: .*\(shift\+tab to cycle\)$")
+msg_bytes = sys.stdin.buffer.read()
+
+unseen_sql = f"type = {Q}message{Q} AND instance = {Q}{base}{Q} AND id > {last_id}"
+r_unseen = subprocess.run(["hcom", "events", "--sql", unseen_sql, "--last", "500"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+if r_unseen.returncode == 0:
+    evs = []
+    for line in r_unseen.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(ev, dict) and isinstance(ev.get("id"), int):
+            evs.append(ev)
+    evs.sort(key=lambda e: e["id"])
+    for ev in evs:
+        data = ev.get("data") or {}
+        print("LMC_UNSEEN " + json.dumps({"id": ev["id"], "ts": ev.get("ts") or "", "text": data.get("text") or ""}, ensure_ascii=False))
+
+r_send = subprocess.run(["hcom", "send", "--from", "bigboss", "@" + name], input=msg_bytes, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+if r_send.returncode != 0:
+    sys.exit(2)
+
+sent_sql = f"type = {Q}message{Q} AND msg_from = {Q}bigboss{Q}"
+r_sent = subprocess.run(["hcom", "events", "--sql", sent_sql, "--last", "5"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+if r_sent.returncode == 0:
+    max_id = None
+    for line in r_sent.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(ev, dict) and isinstance(ev.get("id"), int):
+            if max_id is None or ev["id"] > max_id:
+                max_id = ev["id"]
+    if max_id is not None:
+        print(f"LMC_SENT_ID {max_id}")
+
 def get_agent():
     r = subprocess.run(["hcom", "list", "--json"], stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if r.returncode != 0:
@@ -910,25 +968,73 @@ if st == "listening":
                 if rem2 <= 0:
                     break
                 time.sleep(min(poll_sec, rem2))
-            sys.stderr.write(f"消息已排队，{machine} 下次空闲时送到\n")
+            print(f"LMC_NOTICE 消息已排队，{machine} 下次空闲时送到")
             sys.exit(0)
         if prompt_empty is False and input_text and not MODE_RE.fullmatch(input_text):
-            sys.stderr.write(f"消息已排队：{machine} 的输入框里有没发出的文字，清空后才会送到\n")
+            print(f"LMC_NOTICE 消息已排队：{machine} 的输入框里有没发出的文字，清空后才会送到")
             sys.exit(0)
-sys.stderr.write(f"消息已排队，{machine} 下次空闲时送到\n")
+print(f"LMC_NOTICE 消息已排队，{machine} 下次空闲时送到")
 sys.exit(0)'
-  send_cmd="hcom send --from bigboss @$qname >/dev/null && python3 -c '$verify_py' $qname $qm $qpoll $qwait $qafter </dev/null"
+  send_cmd="python3 -c '$send_py' $qname $qbase $qm $qlast $qpoll $qwait $qafter"
 
   if [ "$use_stdin" = 1 ]; then
-    if ! remote_stdin "$m" "$send_cmd" >/dev/null; then
+    if ! send_out=$(remote_stdin "$m" "$send_cmd"); then
       say_err "向 $m 发送消息失败"
       exit 9
     fi
   else
-    if ! printf '%s' "$msg" | remote_stdin "$m" "$send_cmd" >/dev/null; then
+    if ! send_out=$(printf '%s' "$msg" | remote_stdin "$m" "$send_cmd"); then
       say_err "向 $m 发送消息失败"
       exit 9
     fi
+  fi
+
+  new_last_id=$(printf '%s\n' "$send_out" | python3 -c '
+import datetime, json, sys
+machine = sys.argv[1]
+old_last = int(sys.argv[2])
+def bj_hm(ts):
+    if not ts: return "--:--"
+    try:
+        dt = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone(datetime.timedelta(hours=8))).strftime("%H:%M")
+    except Exception:
+        return str(ts)[:5]
+def one_line(s):
+    return " ".join(str(s or "").splitlines()).strip()
+unseen = []
+notices = []
+sent_id = None
+for line in sys.stdin:
+    line = line.rstrip("\r\n")
+    if line.startswith("LMC_UNSEEN "):
+        try:
+            unseen.append(json.loads(line[11:]))
+        except Exception:
+            pass
+    elif line.startswith("LMC_SENT_ID "):
+        try:
+            sent_id = int(line[12:].strip())
+        except Exception:
+            pass
+    elif line.startswith("LMC_NOTICE "):
+        notices.append(line[11:])
+if unseen:
+    sys.stderr.write(f"{machine} 之前发来、你还没看过的消息：\n")
+    for item in unseen:
+        iid = item.get("id")
+        hm = bj_hm(item.get("ts"))
+        txt = one_line(item.get("text"))
+        sys.stderr.write(f"#{iid} {hm} {txt}\n")
+for note in notices:
+    sys.stderr.write(note + "\n")
+if sent_id is not None:
+    print(max(old_last, sent_id))
+' "$m" "$last_id")
+  if [ -n "$new_last_id" ] && is_uint "$new_last_id"; then
+    atomic_write "$STATE_DIR/$m.last-id" "${new_last_id}"$'\n'
   fi
   rm -f "$STATE_DIR/$m.stopped-at"
 }
