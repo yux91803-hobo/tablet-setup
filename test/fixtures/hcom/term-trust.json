@@ -1,0 +1,39 @@
+{
+ "cursor": [
+  23,
+  0
+ ],
+ "input_text": "Yes, I trust this folder",
+ "lines": [
+  "Accessing workspace:",
+  "",
+  "/data/workspace/demo",
+  "",
+  "Do you trust the contents of this project?",
+  "",
+  "Antigravity CLI requires permission to read, edit, and execute files here.",
+  "",
+  "> Yes, I trust this folder",
+  "  No, exit",
+  "",
+  "  ↑/↓ Navigate · enter Confirm",
+  "                                                     auto · Gemini 4 Neon · high",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ],
+ "prompt_empty": false,
+ "ready": false,
+ "size": [
+  24,
+  80
+ ]
+}

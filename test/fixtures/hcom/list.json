@@ -1,0 +1,34 @@
+[
+ {
+  "agent_id": null,
+  "background_log_file": "/data/home/.hcom/.tmp/logs/background_1795777873_1903.log",
+  "base_name": "keno",
+  "created_at": 1795777873.0,
+  "description": "listening",
+  "directory": "/data/workspace/hcom-test",
+  "headless": true,
+  "hooks_bound": true,
+  "launch_context": {
+   "env": {
+    "SSH_CONNECTION": "(已去掉)"
+   },
+   "git_branch": "",
+   "pid_identity": "linux:(已去掉)",
+   "process_id": "a416d718-feb2-4676-8654-fe37f224451f",
+   "terminal_preset_effective": "default",
+   "tty": ""
+  },
+  "name": "keno",
+  "parent_name": null,
+  "process_bound": true,
+  "session_id": "0569a1e5-6bc7-4df1-816d-90528e193a55",
+  "status": "listening",
+  "status_age_seconds": 0,
+  "status_context": "",
+  "status_detail": "",
+  "tag": null,
+  "tool": "antigravity",
+  "transcript_path": "/data/home/.gemini/antigravity-cli/brain/0569a1e5-6bc7-4df1-816d-90528e193a55/.system_generated/logs/transcript_full.jsonl",
+  "unread_count": 0
+ }
+]

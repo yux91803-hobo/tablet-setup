@@ -1,0 +1,39 @@
+{
+ "cursor": [
+  23,
+  0
+ ],
+ "input_text": "[x] Yes, I agree to help improve Antigravity CLI by allowing",
+ "lines": [
+  "Terms of Service & Data Use",
+  "",
+  "AI coding agents are known to have certain security risks, including autonomous",
+  "code execution, data exfiltration, prompt injection and supply chain risks.",
+  "",
+  "  > [x] Yes, I agree to help improve Antigravity CLI by allowing",
+  "      Google to collect and use my Interactions data,",
+  "",
+  "    [Previous]      [Done]",
+  "",
+  "  ↑/↓ Navigate · enter Toggle",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ],
+ "prompt_empty": false,
+ "ready": false,
+ "size": [
+  24,
+  80
+ ]
+}

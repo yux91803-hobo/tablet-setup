@@ -1,0 +1,39 @@
+{
+ "cursor": [
+  23,
+  0
+ ],
+ "input_text": "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+ "lines": [
+  "      ▄▀▀▄        Antigravity CLI 1.5.18",
+  "     ▀▀▀▀▀▀       (账号已去掉) (Google AI Pro)",
+  "    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (High)",
+  "   ▄▀▀    ▀▀▄     /data/workspace/demo",
+  "",
+  "> /remote-control",
+  "  ⎿  Remote control on for this session.",
+  "     Hostname: instabox-li2-rising-flux",
+  "     Open",
+  "     https://antigravity.google.com/r/00000000-0000-0000-0000-000000000000-v2",
+  "     on another device to take over.",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+  "────────────────────────────────────────────────────────────────────────────────",
+  "? for shortcuts                                      auto · Gemini 4 Neon · high",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ],
+ "prompt_empty": false,
+ "ready": true,
+ "size": [
+  24,
+  80
+ ]
+}

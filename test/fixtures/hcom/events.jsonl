@@ -1,0 +1,14 @@
+{"data":{"from":"keno","intent":"inform","text":"站长在网页上接管了"},"id":40,"instance":"keno","ts":"2026-11-27T11:23:53","type":"message"}
+{"data":{"context":"","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"listening"},"id":41,"instance":"keno","ts":"2026-11-27T11:23:55","type":"status"}
+{"data":{"from":"bigboss","text":"第五条测试：机器刚睡了一觉醒来。请用 hcom 回复 bigboss「醒了，还在」。"},"id":42,"instance":"ext_bigboss","ts":"2026-11-27T11:26:28","type":"message"}
+{"data":{"context":"deliver:bigboss","msg_ts":"2026-11-27T11:26:28.661450+00:00","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":43,"instance":"keno","ts":"2026-11-27T11:26:28","type":"status"}
+{"data":{"context":"tool:run_command","detail":"hcom send @bigboss --intent ack --reply-to 42 --name keno --...","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":44,"instance":"keno","ts":"2026-11-27T11:26:35","type":"status"}
+{"data":{"context":"tool:run_command","detail":"hcom send @bigboss --intent ack --reply-to 42 --name keno --...","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":45,"instance":"keno","ts":"2026-11-27T11:26:40","type":"status"}
+{"data":{"from":"keno","intent":"ack","reply_to_local":42,"text":"醒了，还在"},"id":46,"instance":"keno","ts":"2026-11-27T11:26:51","type":"message"}
+{"data":{"context":"","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"listening"},"id":47,"instance":"keno","ts":"2026-11-27T11:26:54","type":"status"}
+{"data":{"from":"bigboss","text":"第六条测试（模拟你遇到问题）：请用 hcom 问 bigboss 一个问题「串口波特率用 115200 还是 9600？」，问完就停下等回答，不要做别的。"},"id":48,"instance":"ext_bigboss","ts":"2026-11-27T11:38:11","type":"message"}
+{"data":{"context":"deliver:bigboss","msg_ts":"2026-11-27T11:38:11.468834+00:00","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":49,"instance":"keno","ts":"2026-11-27T11:38:11","type":"status"}
+{"data":{"context":"tool:run_command","detail":"hcom send @bigboss --intent request --reply-to 48 --name ken...","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":50,"instance":"keno","ts":"2026-11-27T11:38:16","type":"status"}
+{"data":{"context":"tool:run_command","detail":"hcom send @bigboss --intent request --reply-to 48 --name ken...","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"active"},"id":51,"instance":"keno","ts":"2026-11-27T11:38:21","type":"status"}
+{"data":{"from":"keno","intent":"request","reply_to_local":48,"text":"串口波特率用 115200 还是 9600？"},"id":52,"instance":"keno","ts":"2026-11-27T11:38:31","type":"message"}
+{"data":{"context":"","session":"0569a1e5-6bc7-4df1-816d-90528e193a55","status":"listening"},"id":53,"instance":"keno","ts":"2026-11-27T11:38:34","type":"status"}
