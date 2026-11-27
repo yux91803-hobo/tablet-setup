@@ -88,3 +88,20 @@ test('ib：key 只经环境变量交给 instabox，脚本里不用 env 带参数
   assert.doesNotMatch(src, /set\s+-[a-z]*x/);
   assert.equal(spawnSync('sh', ['-n', IB]).status, 0);
 });
+
+test('ib：调用 instabox 时设 INSTABOX_NO_UPDATE_CHECK=1 关掉更新提示', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tablet-ib-nocheck-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const keyDir = path.join(dir, 'keys');
+  fs.mkdirSync(keyDir, { mode: 0o700 });
+  fs.writeFileSync(path.join(keyDir, 'li2.key'), `${KEYS.li2}\n`, { mode: 0o600 });
+  const fake = path.join(dir, 'instabox');
+  fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write(String(process.env.INSTABOX_NO_UPDATE_CHECK || '') + '\\n');\n`, { mode: 0o755 });
+  const env = { PATH: process.env.PATH, HOME: dir, LIMING_IB_DIR: keyDir, LIMING_INSTABOX: fake };
+  for (const args of [['exec', 'li2', '--', 'true'], ['--help'], ['ls']]) {
+    const r = spawnSync('sh', [IB, ...args], { encoding: 'utf8', env });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.trim().split('\n').filter(l => !l.startsWith('== '));
+    assert.ok(lines.length >= 1 && lines.every(l => l === '1'), `${args.join(' ')} 应传 INSTABOX_NO_UPDATE_CHECK=1，实际：${JSON.stringify(r.stdout)}`);
+  }
+});
