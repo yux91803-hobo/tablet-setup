@@ -219,26 +219,34 @@ test('panelView 里的绑定路径都能在 panelData 的结果里找到', async
   }
 });
 
-test('manifest 的状态条和面板 id 与 index.js 里登记的一致', () => {
+test('manifest 的状态条与网页面板配置、index.js 和 client.js 登记一致', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'package.json'), 'utf8'));
   const patch = fs.readFileSync(path.join(PLUGIN_DIR, 'cordis.patch.yml'), 'utf8');
   const src = fs.readFileSync(path.join(PLUGIN_DIR, 'lib/index.js'), 'utf8');
+  const clientSrc = fs.readFileSync(path.join(PLUGIN_DIR, 'lib/client.js'), 'utf8');
   assert.equal(pkg.name, 'liming-crew');
   assert.equal(pkg.type, 'module');
+  assert.equal(pkg.exports?.['./client'], './lib/client.js');
+  assert.equal(pkg.dsh?.client?.platform, 'web');
+  assert.ok(Array.isArray(pkg.files) && pkg.files.includes('assets'), 'files 应包含 assets 目录');
   assert.match(patch, /name:\s*liming-crew/);
   assert.match(src, /export const name\s*=\s*['"]liming-crew['"]/);
   assert.match(src, /ctx\.inject\(\s*\[\s*['"]dshGo['"]\s*\]/);
+  assert.match(src, /ctx\.inject\(\s*\[\s*['"]webServer['"]\s*\]/);
 
   const stripIds = (pkg.dshGo?.contributes?.['composer.strip'] || []).map(x => x.id);
   const panelIds = (pkg.dshGo?.contributes?.panels || []).map(x => x.id);
   assert.deepEqual(stripIds, ['crew-strip']);
-  assert.deepEqual(panelIds, ['crew']);
+  assert.deepEqual(panelIds, [], '网页面板替换原生 JSON 面板后不应再声明原生 panels，避免遮蔽网页面板');
   for (const id of stripIds) {
     assert.match(src, new RegExp(`\\.strip\\(\\s*['"]${id}['"]`), 'index.js 必须登记状态条 ' + id);
   }
-  for (const id of panelIds) {
-    assert.match(src, new RegExp(`\\.panel\\(\\s*['"]${id}['"]`), 'index.js 必须登记面板 ' + id);
-  }
+  assert.match(clientSrc, /__ModuleLoader__\.load/);
+  assert.match(clientSrc, /sidebarRightTabs/);
+  assert.match(clientSrc, /sidebar\.right\.pane\.tab/);
+  assert.match(clientSrc, /sidebar\.panellist/);
+  assert.match(clientSrc, /name:\s*['"]main['"]/);
+  assert.match(clientSrc, /团队/);
 });
 
 test('crew-client 超时会杀掉子进程', async (t) => {
@@ -263,7 +271,7 @@ test('crew-client 超时会杀掉子进程', async (t) => {
   assert.equal(alive, false, '超时后子进程必须被杀掉，PID ' + pid + ' 仍存活');
 });
 
-test('index.js 状态条只读 status.json 不调 crew；面板插话用延后效果，网页按钮无链接时 toast', async (t) => {
+test('index.js 状态条只读 status.json 不调 crew；webServer 登记 /liming-crew/ 路由', async (t) => {
   const plugin = await import(pathToFileURL(path.join(PLUGIN_DIR, 'lib/index.js')).href);
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'tablet-plugin-idx-'));
   t.after(() => fs.rmSync(d, { recursive: true, force: true }));
@@ -288,16 +296,36 @@ test('index.js 状态条只读 status.json 不调 crew；面板插话用延后�
   });
 
   const strips = {};
-  const panels = {};
+  const stripTaps = {};
+  const registeredRoutes = [];
+  const effects = [];
   plugin.apply({
     inject(deps, fn) {
-      assert.deepEqual(deps, ['dshGo']);
-      fn({
-        dshGo: {
-          strip: (id, handler) => { strips[id] = handler; },
-          panel: (id, def) => { panels[id] = def; },
-        },
-      });
+      if (deps[0] === 'dshGo') {
+        fn({
+          dshGo: {
+            strip: (id, handler) => { strips[id] = handler; },
+            on: (id, handler) => { stripTaps[id] = handler; },
+          },
+        });
+      } else if (deps[0] === 'webServer') {
+        fn({
+          get(k) {
+            assert.equal(k, 'webServer');
+            return {
+              register(def) {
+                registeredRoutes.push(def);
+                return () => {};
+              },
+            };
+          },
+          effect(cb) {
+            effects.push(cb());
+          },
+        });
+      } else {
+        assert.fail('未知依赖注入：' + JSON.stringify(deps));
+      }
     },
   });
 
@@ -308,14 +336,24 @@ test('index.js 状态条只读 status.json 不调 crew；面板插话用延后�
   assert.equal(stripEmits[0].text, 'li 睡着 · li2 空闲');
   assert.equal(fs.existsSync(crewLog), false, '状态条只读 status.json，不能调 crew');
 
-  // web 按钮无链接时返回 toast
-  assert.deepEqual(panels.crew.actions.web(), { toast: '这台还没有网页链接' });
+  if (stripTaps['crew-strip']) {
+    const tapRes = stripTaps['crew-strip']({}, {});
+    assert.match(tapRes.toast, /li 睡着 · li2 空闲/);
+  }
 
-  // send 返回延后效果，result 经 stdin 调 crew send
-  const eff = panels.crew.actions.send({}, { value: { values: { 'data.form.message': '你好 li2' } } });
-  assert.ok(eff.pending && typeof eff.result === 'function');
-  const settled = await eff.result(new AbortController().signal);
-  assert.match(settled.toast, /已发给 li2/);
-  assert.equal(fs.readFileSync(crewLog, 'utf8').trim(), 'send li2 --stdin');
-  assert.equal(fs.readFileSync(path.join(d, 'stdin.log'), 'utf8'), '你好 li2');
+  const paths = registeredRoutes.map(r => r.path);
+  for (const want of [
+    '/liming-crew/state',
+    '/liming-crew/send',
+    '/liming-crew/stop',
+    '/liming-crew/approve',
+    '/liming-crew/screen',
+    '/liming-crew/assets/',
+    '/liming-crew/pets/',
+  ]) {
+    assert.ok(paths.includes(want), 'webServer 缺少路由：' + want);
+  }
+  for (const dispose of effects) {
+    if (typeof dispose === 'function') dispose();
+  }
 });

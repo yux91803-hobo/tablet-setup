@@ -2,6 +2,31 @@
 
 最新的在最上面。搬出来以前的记录（2026-11-25、11-26）在 liming-work-site 仓库的 `docs/CHANGES.md`。
 
+## 2026-11-28 「团队」面板升级为「三方小屋」DSH Go 网页面板（v0.2.0）
+
+- **站长定稿**：采用第四轮「三方小屋」方案（DSH 中央发光鱼缸 + `li` 鲸娘与 `li2` 小粉鱼实景互动），替换 `liming-crew` 原来的原生 JSON 面板；输入框上方状态条 `crew-strip` 保持原样（每 15 秒只读本地 `status.json`，不唤醒云电脑）。
+- **做了什么**：
+  - **网页面板双入口（`liming-crew/lib/client.js`、`liming-crew/package.json`）**：薄 React 外壳复用宿主 React，经 `window.__ModuleLoader__.load` 注册两处入口——对话详情右栏页签副屏（`sidebarRightTabs` + `sidebar.right.pane.tab` + `sidebar.right.pane.tab.title`）和「全部功能 › 插件」整页（`sidebar.panellist` + `main`），标题均为「团队」；移除 `dshGo.contributes.panels` 以避免原生面板遮蔽网页面板。
+  - **引擎端路由与入参校验（`liming-crew/lib/routes.js`、`liming-crew/lib/index.js`）**：经 `ctx.inject(['webServer'])` 挂到 `/liming-crew/` 下，由宿主统一鉴权（同源 Cookie + Host/Origin）：
+    - `GET /liming-crew/state`：聚合 `crew status --json`、运行中机器的最近事件与 `blocked` 机器的终端画面，并检查本机宠物图是否就绪；沿用 `crew-client.js` 超时与取消，服务端与网页端均做单飞跳过（上一次未返回不并发堆积），网页端仅在打开且可见时每 3 秒拉一次，隐藏或卸载即停。
+    - `POST /liming-crew/send`（正文走 stdin，限 1–2000 字）、`POST /liming-crew/stop`、`POST /liming-crew/approve`（仅认 `yes|no`）、`GET /liming-crew/screen?machine=`：机器名严格校验仅认 `li`/`li2`，不拼 shell。
+    - `GET /liming-crew/assets/*`（白名单静态资源与自绘日夜插画）和 `GET /liming-crew/pets/<petId>/<file>`（读取本机 `~/.config/liming/crew/pets/`，阻止路径穿越）。
+  - **纯函数场景映射（`liming-crew/lib/scene.js`）**：`sceneFromCrew(status, events, prev, opts)` 映射全部 8 种状态（睡着、正在叫醒、冷却、干活中、空闲、等审批/非审批设置页区分、刚叫停、连不上），提取真实动作胶囊文字（兜底「干活中」）与审批完整命令；首次打开不重放历史动画、只填充带路由标签与北京时间的群聊记录，后续仅给新事件放飞信/叫停动画；远程接管链接仅认 `https://` 并渲染为真实 `<a>` 走 DSH Go 外部链接确认打开。
+  - **前端小屋引擎与小鲸鱼物理修复（`liming-crew/lib/house-engine.js`、`liming-crew/lib/house-style.css`）**：
+    - 全部样式限定在 `.lc-house-root` 作用域内，按实际容器宽度自适应 400px 副屏与 1280×800 整页，支持浅色/深色主题自动跟随与手动切换。
+    - 默认显示真实数据；保留「演示」按钮按需播放六幕剧本，演示期间顶部显示「演示中」和「退出」按钮。
+    - 内置 BRIEF-4g 修复后的 `WhaleTankController`：相对累加时钟与累加尾巴/胸鳍/呼吸相位消除大时间戳相位跳变；低通频率与摆幅（静止约 0.78 Hz、游动最高约 1.55 Hz、身体呼吸伸缩 ≤ 1.4%）；转身要求对侧 > 22px 持续 ≥ 0.42s 且冷却 ≥ 1.55s、0.40s 缓动转身；转达单程游动、待机航点慢游与 0.60s 切换过渡；30fps × 20s 全 8 种模式实测均满足 `max|Δx|<4`、`max|Δy|<4`、`max|Δtilt|<0.03`、`max|Δtail|<0.12`、1.5s 窗内最多转身 1 次。
+  - **素材与版权边界（`liming-crew/assets/`、`setup.sh`）**：提交自绘压缩后的日夜房屋插画 `house-day.jpg`（195 KB）与 `house-night.jpg`（160 KB），每张 ≤ 800 KB；**不提交任何 DSH Go 宠物精灵图与 `pack.json`**，`setup.sh` 负责从 `cdn.jsdelivr.net/gh/ccch1mneyyy/dsh-go@v1.4.1/app/assets/pets/`（失败回退 `raw.githubusercontent.com/ccch1mneyyy/dsh-go/v1.4.1/app/assets/pets/`）幂等下载并校验 JSON 与 PNG 头到 `~/.config/liming/crew/pets/`，下载失败不中断其余装机步骤；缺图时面板显示占位剪影并提示「宠物图没下载到，重跑装机脚本即可」。
+- **参考项目与文档**：
+  - `ccch1mneyyy/dsh-go`（v1.4.1）：`examples/plugins/dsh-go-example-overlay/{package.json,lib/client.js}`、`runtime/tests/route-probe/{package.json,index.js,client.js}`、`docs/plugins/{web-panels.md,slots.md,hosts.md,choose-path.md}`、`docs/design/plugin-seams.md`、`runtime/patches/route-guard.diff`、`app/assets/islands/island.js`、`app/lib/plugins/seams/seat_planner.dart`、`sdk/plugin-kit/bin/check.mjs`；
+  - DSH `0.2.2-rc.1` 客户端槽位实现：`@deepseek-ai/dsh-client-ui-schedule/lib/client.js`、`@deepseek-ai/dsh-client-ui-sidebar/lib/client.js`（`sidebar.panellist` 与 `main` 整页槽位注册方式）。
+- **验证**：
+  - 新增 `test/scene.test.cjs`、`test/routes.test.cjs`，更新 `test/site.test.cjs`（含版权守卫）、`test/setup.test.cjs`（新件清单 + 宠物图主备下载/幂等/非致命失败）、`test/plugin.test.cjs`（保留原有全部 `views.js` 与 `crew-client.js` 测试，新增测试先红后绿）；
+  - `shellcheck setup.sh ib.sh crew.sh` 0 警告；
+  - `dsh-go/sdk/plugin-kit/bin/check.mjs liming-crew --load --lang zh --budget strip` 0 错误、0 警告；
+  - 在 `li2` 本地 HTTP 宿主加载真实 `lib/index.js` + `lib/client.js` + `crew.sh` 并用 Chromium 截取 400×860 副屏与 1280×800 整页（浅色/深色）及缺图降级共 5 张图核对（注：`li2` 未安装 `dsh` 命令行且按安全规矩不放平板 InstaBox key，完整 `dsh plugin --profile web add` 与真机两台实连待复核者与站长在平板验收）。
+- **谁做的**：实现 Antigravity（`designer-nora`，li2）；待复核合并。
+
 ## 2026-11-27 晚 crew 第一版实测复核修复（10 项）
 
 - **沙箱在 InstaBox 上起不来（`setup.sh`）**：
