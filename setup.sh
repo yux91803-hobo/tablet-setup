@@ -38,10 +38,13 @@ ZIP_SHA256=${LIMING_ZIP_SHA256:-b322c73b9a18f09c6560bff0e4b748e9acdc26272c339b4f
 REMOTE_ZIP=/data/workbuddy-gateway/releases/workbuddy2api-hub-$VERSION.zip
 WORK=''
 GATEWAY_FILES='package.json cordis.patch.yml lib/index.js lib/gateway.js'
-CREW_FILES='package.json cordis.patch.yml lib/index.js lib/views.js lib/crew-client.js'
+CREW_FILES='package.json cordis.patch.yml lib/index.js lib/views.js lib/crew-client.js lib/scene.js lib/routes.js lib/client.js lib/house-engine.js lib/house-style.css assets/house-day.jpg assets/house-night.jpg'
+PETS_PRIMARY_BASE=${LIMING_PETS_PRIMARY_BASE:-https://cdn.jsdelivr.net/gh/ccch1mneyyy/dsh-go@v1.4.1/app/assets/pets}
+PETS_FALLBACK_BASE=${LIMING_PETS_FALLBACK_BASE:-https://raw.githubusercontent.com/ccch1mneyyy/dsh-go/v1.4.1/app/assets/pets}
 HAVE=''          # 有能用的 key 的机器
 OLD_REMOVED=0    # 清掉过以前的云端任务插件
 GW_MISSING=0     # 两台都取不到网关安装包时标记为 1，其余步骤照做
+PETS_MISSING=0   # 宠物精灵图未完整下载时标记为 1，不中断装机
 
 say() { printf '%s\n' "$*"; }
 say_err() { printf '%s\n' "$*" >&2; }
@@ -128,6 +131,71 @@ fetch_file() {
     rm -f "$part"; say_err "下载到的不是要的文件（可能是网站首页）：$url"; return 1
   fi
   mv -f "$part" "$dest"
+}
+
+# 下载 JPEG 插画并核对文件头（FF D8 FF）与最小大小，避免误把 404 HTML 当成图片。
+fetch_jpeg() {
+  local url=$1 dest=$2 part
+  part="$dest.part.$$"
+  if ! curl -fsSL --retry 2 --connect-timeout 20 -o "$part" "$url" 2>/dev/null; then
+    rm -f "$part"; say_err "下载失败：$url"; return 1
+  fi
+  if ! python3 -c 'import os,sys; p=sys.argv[1]; b=open(p,"rb").read(4); sys.exit(0 if os.path.getsize(p)>=1024 and b[:3]==b"\xff\xd8\xff" else 1)' "$part"; then
+    rm -f "$part"; say_err "下载到的不是有效的 JPEG 图片：$url"; return 1
+  fi
+  mv -f "$part" "$dest"
+}
+
+valid_pet_pack() {
+  [ -s "$1" ] || return 1
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if isinstance(d, dict) and isinstance(d.get("animations"), dict) else 1)' "$1" 2>/dev/null
+}
+
+valid_pet_png() {
+  [ -s "$1" ] || return 1
+  python3 -c 'import sys; b=open(sys.argv[1],"rb").read(8); sys.exit(0 if b==b"\x89PNG\r\n\x1a\n" else 1)' "$1" 2>/dev/null
+}
+
+fetch_pet_asset() {
+  local pet=$1 file=$2 kind=$3 dest=$4 base part
+  if [ "$kind" = json ] && valid_pet_pack "$dest"; then return 0; fi
+  if [ "$kind" = png ] && valid_pet_png "$dest"; then return 0; fi
+  mkdir -p "$(dirname "$dest")"
+  part="$dest.part.$$"
+  for base in "$PETS_PRIMARY_BASE" "$PETS_FALLBACK_BASE"; do
+    rm -f "$part"
+    if curl -fsSL --retry 1 --connect-timeout 15 --max-time 30 -o "$part" "$base/$pet/$file" 2>/dev/null; then
+      if { [ "$kind" = json ] && valid_pet_pack "$part"; } || { [ "$kind" = png ] && valid_pet_png "$part"; }; then
+        mv -f "$part" "$dest"
+        return 0
+      fi
+    fi
+  done
+  rm -f "$part"
+  return 1
+}
+
+# 从 DSH Go v1.4.1 下载三方小屋用到的宠物精灵图（先 jsDelivr 后 raw.githubusercontent.com）。
+# 版权归 DSH Go 作者，不随本仓库分发；下载失败不中断其余装机步骤，重跑可补齐。
+download_pets() {
+  local ok=1 f
+  local wg_pngs='idle.png idle-look.png idle-spout.png thinking.png typing.png notification.png happy.png thumbs-up.png smile-hearts.png sleeping.png waking.png error.png carrying.png swim.png poke-left.png tickle.png'
+  local pf_pngs='idle.png bubble.png think.png type.png wave.png happy.png sleep.png stretch.png cry.png carry.png swim.png poke.png tickle.png'
+  mkdir -p "$CREW_STATE_DIR/pets/whale-girl" "$CREW_STATE_DIR/pets/pink-fish"
+  say "下载三方小屋宠物精灵图（鲸娘、小粉鱼）……"
+  fetch_pet_asset whale-girl pack.json json "$CREW_STATE_DIR/pets/whale-girl/pack.json" || ok=0
+  for f in $wg_pngs; do
+    fetch_pet_asset whale-girl "$f" png "$CREW_STATE_DIR/pets/whale-girl/$f" || ok=0
+  done
+  fetch_pet_asset pink-fish pack.json json "$CREW_STATE_DIR/pets/pink-fish/pack.json" || ok=0
+  for f in $pf_pngs; do
+    fetch_pet_asset pink-fish "$f" png "$CREW_STATE_DIR/pets/pink-fish/$f" || ok=0
+  done
+  if [ "$ok" != 1 ]; then
+    PETS_MISSING=1
+    say_err "宠物图没完整下载到（面板会先用剪影显示，稍后重跑装机脚本即可补齐）。"
+  fi
+  return 0
 }
 
 verify_zip() {
@@ -420,7 +488,7 @@ ensure_packages() {
 dry_run_plan() {
   say "--dry-run：只列出要做的事，什么都没改。"
   say "1. 检查 dsh；缺 python3、curl 才装；没有 InstaBox 命令行就 npm i -g instabox@$INSTABOX_VERSION。"
-  say "2. 从 $BASE 下载网关插件、团队插件（liming-crew）、ib、crew、技能「团队」和 TEAM.template.md。"
+  say "2. 从 $BASE 下载网关插件、团队三方小屋网页面板插件（liming-crew，含房子日夜插画）、ib、crew、技能「团队」和 TEAM.template.md；并从 jsDelivr / GitHub 下载鲸娘与小粉鱼精灵图到 $CREW_STATE_DIR/pets/（下载失败不中断其余步骤）。"
   say "3. 问 li2$([ "$1" = 1 ] || echo '、li') 所在账号的 InstaBox key（只要 machines:read 和 machines:write），用 instabox get 核对后存到 $KEY_DIR（权限 600）；再问一次是否允许 crew 自动信任新目录。"
   say "4. 网关没装就尝试从云电脑取安装包（取不到则跳过网关、继续装其余部分）；插件分别装到 $PLUGIN_DIR 和 $CREW_PLUGIN_DIR，第一次装时挂进 web 配置。"
   say "5. 以前装过云端任务插件（$OLD_CLOUD_PLUGIN_DIR、$OLD_CLOUD_DIR）就卸掉删掉；删掉旧技能目录 $OLD_SKILL_DIR。"
@@ -440,14 +508,19 @@ summary() {
   fi
   say "· 命令：$BIN_DIR/ib、$BIN_DIR/crew"
   say "· 技能「团队」：$SKILL_DIR（含 TEAM.template.md）；自动信任目录：$trust_msg"
-  say "· 插件「团队」：$CREW_PLUGIN_DIR"
+  say "· 插件「团队」：$CREW_PLUGIN_DIR（三方小屋网页面板 + 输入框状态条）"
+  if [ "$PETS_MISSING" = 1 ]; then
+    say "· 宠物图：未完整下载（面板会先显示占位剪影，稍后重跑装机脚本即可）"
+  else
+    say "· 宠物图：$CREW_STATE_DIR/pets/（鲸娘、小粉鱼）"
+  fi
   [ "$OLD_REMOVED" = 1 ] && say "· 旧的云端任务插件已删掉（平板上的旧令牌、旧 key 一起删了；InstaBox 后台那几把旧 key 可以吊销）"
   while IFS= read -r line; do [ -n "$line" ] && say "· $line"; done <<<"$1"
   cat <<'EOF'
 
 以后直接在聊天里让 DSH 带队，比如：「在 li2 上开个项目，做……」
 看云上 Antigravity 的现场：
-· 面板：App 全部功能里的「团队」（或聊天页输入框上方「插件」弹层），能看最近动作、终端画面、插话、叫停、允许/拒绝；
+· 面板：App 对话详情右栏页签（副屏）或「全部功能 › 插件」整页打开「团队」三方小屋，实时看两台云电脑现场、三方群聊、终端画面，直接插话、叫停、审批、接管网页，也可以点「演示」看六幕剧本；
 · 状态条：输入框上方一行，只读本地缓存，不会叫醒云电脑。
 
 第一次还要做这几步：
@@ -480,7 +553,7 @@ main() {
   WORK=$(mktemp -d)
   trap 'rm -rf "$WORK"' EXIT
   say "下载插件和配置……"
-  mkdir -p "$WORK/plugin/lib" "$WORK/crew-plugin/lib"
+  mkdir -p "$WORK/plugin/lib" "$WORK/crew-plugin/lib" "$WORK/crew-plugin/assets"
   fetch_file "$BASE/liming-gateway/package.json" "$WORK/plugin/package.json" '"name": "liming-gateway"' || die "网关插件没下载下来"
   fetch_file "$BASE/liming-gateway/cordis.patch.yml" "$WORK/plugin/cordis.patch.yml" 'liming-gateway' || die "网关插件没下载下来"
   fetch_file "$BASE/liming-gateway/lib/index.js" "$WORK/plugin/lib/index.js" 'liming-gateway' || die "网关插件没下载下来"
@@ -490,6 +563,13 @@ main() {
   fetch_file "$BASE/liming-crew/lib/index.js" "$WORK/crew-plugin/lib/index.js" 'liming-crew' || die "团队插件没下载下来"
   fetch_file "$BASE/liming-crew/lib/views.js" "$WORK/crew-plugin/lib/views.js" 'stripText' || die "团队插件没下载下来"
   fetch_file "$BASE/liming-crew/lib/crew-client.js" "$WORK/crew-plugin/lib/crew-client.js" 'runCrew' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/scene.js" "$WORK/crew-plugin/lib/scene.js" 'sceneFromCrew' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/routes.js" "$WORK/crew-plugin/lib/routes.js" 'registerCrewRoutes' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/client.js" "$WORK/crew-plugin/lib/client.js" 'sidebar.right.pane.tab' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/house-engine.js" "$WORK/crew-plugin/lib/house-engine.js" 'WhaleTankController' || die "团队插件没下载下来"
+  fetch_file "$BASE/liming-crew/lib/house-style.css" "$WORK/crew-plugin/lib/house-style.css" '.lc-house-root' || die "团队插件没下载下来"
+  fetch_jpeg "$BASE/liming-crew/assets/house-day.jpg" "$WORK/crew-plugin/assets/house-day.jpg" || die "团队插件插画没下载下来"
+  fetch_jpeg "$BASE/liming-crew/assets/house-night.jpg" "$WORK/crew-plugin/assets/house-night.jpg" || die "团队插件插画没下载下来"
   fetch_file "$BASE/ib.sh" "$WORK/ib.sh" 'LIMING_IB_DIR' || die "ib 没下载下来"
   fetch_file "$BASE/crew.sh" "$WORK/crew.sh" 'LIMING_CREW_STATE' || die "crew 没下载下来"
   fetch_file "$BASE/skills/liming-crew/SKILL.md" "$WORK/SKILL.md" 'name: liming-crew' || die "技能没下载下来"
@@ -501,6 +581,7 @@ main() {
   ensure_gateway || die "网关没装上"
   install_plugin "$WORK/plugin" "$PLUGIN_DIR" "$GATEWAY_FILES" || die "网关插件没装上"
   install_plugin "$WORK/crew-plugin" "$CREW_PLUGIN_DIR" "$CREW_FILES" || die "团队插件没装上"
+  download_pets
   cleanup_old_tablet
   install_tools
   for m in li2 li; do

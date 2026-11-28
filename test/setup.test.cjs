@@ -83,10 +83,30 @@ fi
   fs.writeFileSync(path.join(bin,'npm'),`#!/bin/sh\necho "npm $*" >> "$HOME/remote.log"\ncase "$*" in *@playwright/cli*) printf '#!/bin/sh\\necho "playwright-cli $*" >> "$HOME/remote.log"\\n' > "${bin}/playwright-cli"; chmod +x "${bin}/playwright-cli";; esac\n`,{mode:0o755});
   return h;
 }
-function rig(t,{input=[KEYS.li2,KEYS.li]}={}){
+const PNG_HDR=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d]);
+const PET_SPECS={
+  'whale-girl':['idle.png','idle-look.png','idle-spout.png','thinking.png','typing.png','notification.png','happy.png','thumbs-up.png','smile-hearts.png','sleeping.png','waking.png','error.png','carrying.png','swim.png','poke-left.png','tickle.png'],
+  'pink-fish':['idle.png','bubble.png','think.png','type.png','wave.png','happy.png','sleep.png','stretch.png','cry.png','carry.png','swim.png','poke.png','tickle.png'],
+};
+function makeFakePetsDir(baseDir){
+  for(const [petId,pngs] of Object.entries(PET_SPECS)){
+    const pd=path.join(baseDir,petId);
+    fs.mkdirSync(pd,{recursive:true});
+    const animations={};
+    for(const p of pngs){
+      animations[p.replace(/\.png$/,'')]={sheet:p,frameW:52,frameH:49,cols:1,box:{x:0,y:0,w:52,h:49},loop:true,frames:[{i:0,ms:120}]};
+      fs.writeFileSync(path.join(pd,p),PNG_HDR);
+    }
+    fs.writeFileSync(path.join(pd,'pack.json'),JSON.stringify({schema:1,id:petId,canvas:{w:69,h:66},animations}));
+  }
+}
+function rig(t,{input=[KEYS.li2,KEYS.li],petsPrimary=true,petsFallback=true}={}){
   const d=tmp(t),bin=path.join(d,'bin'),curlBin=path.join(d,'curl-bin');
   fs.mkdirSync(bin);fs.mkdirSync(curlBin);
   makeBaseBin(d);
+  const petsDir1=path.join(d,'pets-primary'),petsDir2=path.join(d,'pets-fallback');
+  if(petsPrimary)makeFakePetsDir(petsDir1);
+  if(petsFallback)makeFakePetsDir(petsDir2);
   const realCurl=spawnSync('which',['curl'],{encoding:'utf8'}).stdout.trim()||'/usr/bin/curl';
   fs.writeFileSync(path.join(curlBin,'curl'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "$FAKE_DIR/curl.log"\nexec ${JSON.stringify(realCurl)} "$@"\n`,{mode:0o755});
   fs.writeFileSync(path.join(bin,'instabox'),FAKE_IB,{mode:0o755});
@@ -98,6 +118,7 @@ function rig(t,{input=[KEYS.li2,KEYS.li]}={}){
   remoteHome(d,'li2');remoteHome(d,'li');
   const home=path.join(d,'tablet-home');fs.mkdirSync(home);
   const env={PATH:curlBin+':'+process.env.PATH,HOME:home,TMPDIR:os.tmpdir(),FAKE_DIR:d,FAKE_ZIP:zip,KEY_LI2:KEYS.li2,KEY_LI:KEYS.li,LIMING_BASE:'file://'+tablet,
+    LIMING_PETS_PRIMARY_BASE:'file://'+petsDir1,LIMING_PETS_FALLBACK_BASE:'file://'+petsDir2,
     LIMING_GW_DIR:path.join(d,'gw'),LIMING_PLUGIN_DIR:path.join(d,'plugin'),LIMING_CREW_PLUGIN_DIR:path.join(d,'crew-plugin'),
     LIMING_IB_DIR:path.join(d,'keys'),LIMING_BIN_DIR:path.join(d,'usr-bin'),LIMING_CREW_STATE:path.join(d,'crew-state'),
     LIMING_SKILL_DIR:path.join(d,'skills/liming-crew'),LIMING_OLD_SKILL_DIR:path.join(d,'skills/liming-cloud-computers'),
@@ -389,8 +410,13 @@ test('装机下载并装好 crew、技能「团队」、TEAM 模板和插件 lim
   assert.equal(fs.readFileSync(path.join(env.LIMING_SKILL_DIR,'SKILL.md'),'utf8'),fs.readFileSync(path.join(tablet,'skills/liming-crew/SKILL.md'),'utf8'));
   assert.equal(fs.readFileSync(path.join(env.LIMING_SKILL_DIR,'TEAM.template.md'),'utf8'),fs.readFileSync(path.join(tablet,'skills/liming-crew/TEAM.template.md'),'utf8'));
   assert.ok(!fs.existsSync(env.LIMING_OLD_SKILL_DIR),'旧技能目录应被删掉');
-  for(const f of ['package.json','cordis.patch.yml','lib/index.js','lib/views.js','lib/crew-client.js']){
-    assert.equal(fs.readFileSync(path.join(env.LIMING_CREW_PLUGIN_DIR,f),'utf8'),fs.readFileSync(path.join(tablet,'liming-crew',f),'utf8'),'插件文件 '+f);
+  for(const f of [
+    'package.json','cordis.patch.yml',
+    'lib/index.js','lib/views.js','lib/crew-client.js',
+    'lib/scene.js','lib/routes.js','lib/client.js','lib/house-engine.js','lib/house-style.css',
+    'assets/house-day.jpg','assets/house-night.jpg',
+  ]){
+    assert.deepEqual(fs.readFileSync(path.join(env.LIMING_CREW_PLUGIN_DIR,f)),fs.readFileSync(path.join(tablet,'liming-crew',f)),'插件文件 '+f);
   }
   assert.ok(fs.existsSync(path.join(env.LIMING_CREW_PLUGIN_DIR,'.added')));
   assert.match(r.stdout,/团队/);
@@ -481,4 +507,43 @@ test('云端准备：unshare 检查失败或没有 sudo 时报 no-proc，小结�
     assert.ok(fs.existsSync(path.join(h,'.gemini/antigravity-cli/settings.json')),m+' 权限规则仍应写进去');
     assert.match(fs.readFileSync(path.join(h,'remote.log'),'utf8'),/playwright-cli install-browser chromium/,m+' 后续步骤不能中断');
   }
+});
+
+test('宠物精灵图下载：默认走 jsDelivr + raw.githubusercontent.com 备用地址，校验 pack.json，重跑幂等，失败不中断装机',t=>{
+  // 1. 核对默认主备地址
+  const defUrls=spawnSync('bash',['-c','source "$0"; echo "$PETS_PRIMARY_BASE|$PETS_FALLBACK_BASE"',setup],{env:{PATH:process.env.PATH,LIMING_SETUP_LIB:'1'},encoding:'utf8'});
+  assert.equal(defUrls.status,0,defUrls.stderr);
+  assert.equal(
+    defUrls.stdout.trim(),
+    'https://cdn.jsdelivr.net/gh/ccch1mneyyy/dsh-go@v1.4.1/app/assets/pets|https://raw.githubusercontent.com/ccch1mneyyy/dsh-go/v1.4.1/app/assets/pets'
+  );
+
+  // 2. 主地址缺失时自动回退到备用地址，全部下载并校验 pack.json；重跑时跳过已校验文件
+  const fb=rig(t,{petsPrimary:false,petsFallback:true});
+  const r1=fb.run('--skip-li');
+  assert.equal(r1.status,0,r1.stdout+r1.stderr);
+  const wgPack=path.join(fb.env.LIMING_CREW_STATE,'pets/whale-girl/pack.json');
+  const pfPack=path.join(fb.env.LIMING_CREW_STATE,'pets/pink-fish/pack.json');
+  assert.ok(fs.existsSync(wgPack),'whale-girl pack.json 应已从备用地址下载');
+  assert.ok(fs.existsSync(pfPack),'pink-fish pack.json 应已从备用地址下载');
+  assert.equal(JSON.parse(fs.readFileSync(wgPack,'utf8')).id,'whale-girl');
+  assert.equal(JSON.parse(fs.readFileSync(pfPack,'utf8')).id,'pink-fish');
+  assert.ok(fs.existsSync(path.join(fb.env.LIMING_CREW_STATE,'pets/whale-girl/typing.png')));
+  assert.ok(fs.existsSync(path.join(fb.env.LIMING_CREW_STATE,'pets/pink-fish/type.png')));
+  const curlCount1=fb.read('curl.log').split('\n').filter(l=>l.includes('pets-fallback')).length;
+  assert.ok(curlCount1>=31,'首次应从备用地址下载 2 个 pack.json + 29 张 PNG');
+
+  // 重跑：所有文件已合法存在，不再重新请求宠物图
+  fs.writeFileSync(path.join(fb.d,'tty'),'\n\n');
+  const r2=fb.run('--skip-li');
+  assert.equal(r2.status,0,r2.stdout+r2.stderr);
+  const curlCount2=fb.read('curl.log').split('\n').filter(l=>l.includes('pets-fallback')).length;
+  assert.equal(curlCount2,curlCount1,'重跑时已合法下载的宠物图不应重复下载');
+
+  // 3. 主备地址都失败时，不中断装机，并提示重跑装机脚本
+  const fail=rig(t,{petsPrimary:false,petsFallback:false});
+  const r3=fail.run('--skip-li');
+  assert.equal(r3.status,0,'宠物图下载失败不应中断整个装机：'+r3.stderr);
+  assert.ok(fs.existsSync(path.join(fail.env.LIMING_CREW_PLUGIN_DIR,'lib/client.js')),'其余插件文件应照常装好');
+  assert.match(r3.stdout+r3.stderr,/宠物图/);
 });
